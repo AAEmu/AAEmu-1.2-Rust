@@ -287,7 +287,16 @@ pub fn quest(
         return;
     };
     let quests = quests_hook(ctx.server);
-    if !quests.has_quest(ctx.server, player, f.quest_id) {
+    // r208022 RVA 0x3c9a80 dispatches by authored quest kind. Compact links all
+    // 15 live doodad report acts to kind 2 on the same doodad and quest.
+    let active = quests.has_quest(ctx.server, player, f.quest_id);
+    let offer = match f.quest_kind_id {
+        1 if !active => true,
+        2 if active => false,
+        1 | 2 => return,
+        _ => !active,
+    };
+    if offer {
         // A scheduled quest is offered (marker packet) only while its window is in progress.
         if !crate::systems::quests::quest_schedule_allows(
             &ctx.server.game_data.systems.npcs.schedule,

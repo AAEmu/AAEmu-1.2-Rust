@@ -373,6 +373,7 @@ fn raise_pvp_zone_kill(
     use crate::systems::quests::events::{kill_unit, with_quests, QuestEvent};
     let event = QuestEvent::ZoneKill {
         zone_group_id,
+        credited_character_id: killer.character_id,
         killer: kill_unit(server, &WorldObject::from(killer.clone()), None),
         victim: kill_unit(server, victim, None),
     };

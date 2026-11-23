@@ -1420,6 +1420,8 @@ async fn let_it_done_with_only_an_auto_complete_reward_finishes_at_full_progress
         start(ctx, 4967);
         let interact = QuestEvent::Interaction {
             doodad_id: 5892,
+            wi_id: 19,
+            phase: 0,
             source_player_id: 1,
         };
         ctx.dispatch(&interact).unwrap();
@@ -1577,6 +1579,8 @@ async fn objective_acts_progress_on_their_events() {
         let inter = start(ctx, 4);
         ctx.dispatch(&QuestEvent::Interaction {
             doodad_id: 88,
+            wi_id: 1,
+            phase: 0,
             source_player_id: 1,
         })
         .unwrap();
@@ -1584,6 +1588,8 @@ async fn objective_acts_progress_on_their_events() {
         assert_eq!(ctx.st.quest(inter).unwrap().objectives[0], 1);
         ctx.dispatch(&QuestEvent::Interaction {
             doodad_id: 88,
+            wi_id: 1,
+            phase: 0,
             source_player_id: 1,
         })
         .unwrap();
@@ -1613,6 +1619,7 @@ async fn objective_acts_progress_on_their_events() {
         };
         let zk = QuestEvent::ZoneKill {
             zone_group_id: 12,
+            credited_character_id: 1,
             killer,
             victim,
         };
@@ -1782,6 +1789,7 @@ async fn zone_kill_faction_and_level_rules() {
         let kill = |ctx: &mut Ctx<'_>, killer: super::engine::KillUnitInfo, v| {
             ctx.dispatch(&QuestEvent::ZoneKill {
                 zone_group_id: 1,
+                credited_character_id: 1,
                 killer,
                 victim: v,
             })
@@ -6156,6 +6164,7 @@ async fn zone_kill_with_unset_level_range_accepts_any_victim() {
         let kill = |ctx: &mut Ctx<'_>, victim| {
             ctx.dispatch(&QuestEvent::ZoneKill {
                 zone_group_id: 1,
+                credited_character_id: 1,
                 killer: me.clone(),
                 victim,
             })
@@ -6196,6 +6205,7 @@ async fn zone_kill_team_share_is_not_reshared_by_the_receiver() {
         // Own kill: shared with the team.
         ctx.dispatch(&QuestEvent::ZoneKill {
             zone_group_id: 1,
+            credited_character_id: 1,
             killer: own(1),
             victim: victim.clone(),
         })
@@ -6208,6 +6218,7 @@ async fn zone_kill_team_share_is_not_reshared_by_the_receiver() {
         // A team mate's kill arrives: it counts, but is not shared again.
         ctx.dispatch(&QuestEvent::ZoneKill {
             zone_group_id: 1,
+            credited_character_id: 2,
             killer: own(2),
             victim,
         })
@@ -6970,4 +6981,192 @@ async fn client_quest_requests_name_an_npc_within_reach() {
         .drain()
         .iter()
         .any(|(op, _)| *op == sc::SCQuestContextFailedPacket));
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_interaction_3742_requires_wi_19() {
+    assert_interaction_objective(3742, 522, [(0, 18, 0), (1, 19, 0)]).await;
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_interaction_991_requires_destination_phase_5522() {
+    assert_interaction_objective(991, 163, [(2590, 19, 5521), (2590, 19, 5522)]).await;
+}
+
+async fn assert_interaction_objective(
+    quest_id: u32,
+    detail_id: u32,
+    [wrong, right]: [(u32, i32, u32); 2],
+) {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let data = real_data(&conn);
+    let act = data
+        .act_template(detail_id, "QuestActObjInteraction")
+        .unwrap();
+    assert_eq!(act.quest_id, quest_id);
+    let (server, _) = server_with(|data| {
+        // Quest 3742 authors count zero. Give the selector an observable slot
+        // in the fixture while preserving the shipped count in the loader.
+        single_act_quest(data, quest_id, act.count.max(1), act.kind.clone());
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, quest_id);
+        for ((doodad_id, wi_id, phase), count) in [(wrong, 0), (right, 1)] {
+            ctx.dispatch(&QuestEvent::Interaction {
+                doodad_id,
+                wi_id,
+                phase,
+                source_player_id: 1,
+            })
+            .unwrap();
+            assert_eq!(ctx.st.quest(h).unwrap().objectives[0], count);
+        }
+    });
+}
+
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn zone_kill_objective_6571_requires_client_display_count() {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let data = real_data(&conn);
+    let act = data
+        .acts
+        .iter()
+        .find(|act| {
+            act.quest_id == 6571
+                && act.detail_id == 128
+                && matches!(act.kind, ActKind::ObjZoneKill { .. })
+        })
+        .unwrap();
+    assert_eq!(act.count, 20);
+}
+
+#[tokio::test]
+async fn zone_kill_objective_mixed_count_does_not_complete_at_half() {
+    let (server, _rec) = server_with(|data| {
+        single_act_quest(data, 14, 20, zone_kill_act(10, 10, false, (0, 0, 0, 0)));
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let handle = start(ctx, 14);
+        let step = ctx
+            .st
+            .quest(handle)
+            .unwrap()
+            .steps
+            .iter()
+            .position(|step| step.kind == kind::PROGRESS)
+            .unwrap();
+        let path = super::state::ActPath {
+            step,
+            component: 0,
+            act: 0,
+        };
+        assert!(!ctx.act_run(handle, path, 10));
+        assert!(ctx.act_run(handle, path, 20));
+    });
+}
+
+#[tokio::test]
+async fn zone_kill_objective_self_only_uses_killer_instead_of_credit_recipient() {
+    let (server, _) = server_with(|data| {
+        single_act_quest(data, 14, 2, zone_kill_act(0, 2, false, (0, 0, 0, 0)));
+        let mut shared = zone_kill_act(0, 2, false, (0, 0, 0, 0));
+        if let ActKind::ObjZoneKill { is_party, .. } = &mut shared {
+            *is_party = true;
+        }
+        single_act_quest(data, 15, 2, shared);
+    });
+    let client = TestClient::new(&server, 1, 1001);
+    let recipient = spawn_player(&server, &client, character(), 0x100);
+    let enemy = WorldObject::from(&recipient);
+    let other_client = TestClient::new(&server, 2, 1002);
+    let other = spawn_player(
+        &server,
+        &other_client,
+        test_character(2, "Killer", 100.0, 100.0),
+        0x101,
+    );
+    for id in [14, 15] {
+        events::add_quest(&server, &recipient, id, false);
+    }
+    server.systems.quests.run_queued_evaluations(&server);
+    let victim = timed_hunt_victim(&server);
+    events::on_npc_killed_by(
+        &server,
+        &recipient,
+        &victim,
+        Some(&WorldObject::from(&other)),
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    {
+        let c = recipient.data();
+        assert_eq!(
+            c.quests
+                .active
+                .iter()
+                .find(|q| q.template_id == 14)
+                .unwrap()
+                .objectives[0],
+            0
+        );
+        assert_eq!(
+            c.quests
+                .active
+                .iter()
+                .find(|q| q.template_id == 15)
+                .unwrap()
+                .objectives[0],
+            1
+        );
+    }
+    events::on_npc_killed_by(&server, &recipient, &victim, Some(&enemy));
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(
+        recipient
+            .data()
+            .quests
+            .active
+            .iter()
+            .find(|q| q.template_id == 14)
+            .unwrap()
+            .objectives[0],
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_aggro_2432_requires_kill_within_range() {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let data = real_data(&conn);
+    let act = data.act_template(4, "QuestActObjAggro").unwrap();
+    assert_eq!(act.quest_id, 2432);
+    let (server, _) = server_with(|data| {
+        single_act_quest(data, 2432, act.count, act.kind.clone());
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 2432);
+        let quest = ctx.st.quest_mut(h).unwrap();
+        quest.acceptor_type = acceptor::NPC;
+        quest.acceptor_id = 600;
+        for (distance, expected) in [(30.1, 0), (30.0, 1)] {
+            ctx.dispatch(&QuestEvent::Kill {
+                target: None,
+                killer: None,
+                victim: Some(super::engine::KillUnitInfo {
+                    npc_template_id: Some(600),
+                    position: (distance, 0.0, 0.0),
+                    aggro_percent: 10.0,
+                    ..Default::default()
+                }),
+            })
+            .unwrap();
+            assert_eq!(ctx.st.quest(h).unwrap().objectives[0], expected);
+        }
+    });
 }

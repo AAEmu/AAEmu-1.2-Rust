@@ -100,6 +100,9 @@ pub struct KillUnitInfo {
     pub level: u8,
     /// `Npc.GetAggroRatingInPercent(owner.ObjId)` for the event's owner (100 when not an NPC).
     pub aggro_percent: f32,
+    /// World position at kill time. The 1.2 compact's ObjAggro range (r208022
+    /// loader 0x8a0450) provisionally limits credit by owner-to-victim distance.
+    pub position: (f32, f32, f32),
 }
 
 /// World facts an operation needs, captured before the character is locked.

@@ -251,13 +251,21 @@ impl QuestsBridge for QuestsForNpcs {
         &self,
         server: &GameServer,
         player: &PlayerRef,
-        _interaction: u32,
+        interaction: u32,
         target: &WorldObject,
     ) {
-        if let Some(d) = target.as_doodad() {
-            let template_id = d.data().template_id;
-            super::events::on_doodad_interaction(server, player, player, template_id);
-        }
+        let (template_id, phase) = target.as_doodad().map_or((0, 0), |doodad| {
+            let d = doodad.data();
+            (d.template_id, d.func_group_id)
+        });
+        super::events::on_world_interaction(
+            server,
+            player,
+            player,
+            template_id,
+            interaction as i32,
+            phase,
+        );
     }
 
     fn on_npc_died(&self, server: &GameServer, npc: &NpcRef) {
@@ -280,8 +288,14 @@ impl QuestsBridge for QuestsForNpcs {
         }
     }
 
-    fn on_npc_killed(&self, server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
-        super::events::on_npc_killed(server, player, npc);
+    fn on_npc_killed_by(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        npc: &NpcRef,
+        killer: Option<&WorldObject>,
+    ) {
+        super::events::on_npc_killed_by(server, player, npc, killer);
     }
 
     fn on_npc_scripted_kill(&self, server: &GameServer, player: &PlayerRef, npc: &NpcRef) {

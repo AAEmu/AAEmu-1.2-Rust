@@ -263,14 +263,8 @@ impl Ctx<'_> {
             }
             ObjMateLevel { .. } => self.mate_level_objective(h, a) > 0,
             ObjSphere { .. } | ObjTalkNpcGroup { .. } | ObjTalk { .. } => count > 0,
-            ObjZoneKill {
-                count_player_kill,
-                count_npc,
-                ..
-            } => {
-                (*count_npc > 0 && count >= *count_npc)
-                    || (*count_player_kill > 0 && count >= *count_player_kill)
-            }
+            // Use the r208022 objective total (RVA 0x7e3440) with the shared progress counter.
+            ObjZoneKill { .. } => at.count > 0 && count >= at.count,
             ObjZoneMonsterHunt { .. } => {
                 if t.score > 0 {
                     count.wrapping_mul(at.count) >= t.score
@@ -953,15 +947,26 @@ impl Ctx<'_> {
             (
                 ObjInteraction {
                     doodad_id,
+                    wi_id,
+                    phase,
                     team_share,
                     ..
                 },
                 QuestEvent::Interaction {
                     doodad_id: d,
+                    wi_id: actual_wi,
+                    phase: actual_phase,
                     source_player_id,
                 },
             ) => {
-                if d != doodad_id {
+                // r208022 RVA 0x89a680 loads all three selectors. The compact
+                // allows a WI without a doodad (3742) and authors destination
+                // phases (991 uses 5522, the next phase of function 4664).
+                if (*doodad_id == 0 && *wi_id <= 0)
+                    || (*doodad_id != 0 && d != doodad_id)
+                    || (*wi_id > 0 && actual_wi != wi_id)
+                    || (*phase != 0 && actual_phase != phase)
+                {
                     return Ok(());
                 }
                 self.add_objective(h, a, 1)?;
@@ -1045,6 +1050,7 @@ impl Ctx<'_> {
                 },
                 QuestEvent::ZoneKill {
                     zone_group_id,
+                    credited_character_id,
                     killer,
                     victim,
                 },
@@ -1094,7 +1100,7 @@ impl Ctx<'_> {
                     // victim and act, and not at all when `Npc.DoDie` already handed this
                     // character the kill directly (Rust only: the C# counted both, and once
                     // per eligible member's share).
-                    if killer.character_id != Some(self.c.id)
+                    if self.c.id != *credited_character_id
                         && !self.c.skill_char.claim_shared_kill_credit(
                             victim.obj_id,
                             h,
@@ -1105,10 +1111,10 @@ impl Ctx<'_> {
                         return Ok(());
                     }
                     self.add_objective(h, a, 1)?;
-                    // Only the original killer shares with the team: the shared event reaches the
-                    // members with the killer unchanged, so they must not share it again
+                    // Only the original credit recipient shares with the team: the event reaches the
+                    // members with the credited character unchanged, so they must not share again
                     // (the C# `OnZoneKill` re-delegated without bound).
-                    if *team_share && killer.character_id == Some(self.c.id) {
+                    if *team_share && self.c.id == *credited_character_id {
                         self.deferred
                             .push(Deferred::TeamEvent { event: ev.clone() });
                     }
@@ -1241,6 +1247,7 @@ impl Ctx<'_> {
             }
             (
                 ObjAggro {
+                    range,
                     rank1,
                     rank1_ratio,
                     rank1_item,
@@ -1265,6 +1272,14 @@ impl Ctx<'_> {
                     return Ok(());
                 };
                 if acc_type != acceptor::NPC || npc_template != acc_id {
+                    return Ok(());
+                }
+                // Server rule inferred from the compact: the authored aggro range
+                // (r208022 loader 0x8a0450) limits credit to owners near the dying NPC.
+                let (x, y, z) = self.env.position;
+                let (tx, ty, tz) = t.position;
+                let distance_squared = (x - tx).powi(2) + (y - ty).powi(2) + (z - tz).powi(2);
+                if *range > 0 && distance_squared > (*range as f32).powi(2) {
                     return Ok(());
                 }
                 let rate = t.aggro_percent;

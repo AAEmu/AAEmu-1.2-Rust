@@ -457,6 +457,12 @@ pub fn apply_effect(
     args: &EffectArgs<'_>,
 ) -> bool {
     let _ = kind;
+    let EffectTemplate::Craft {
+        world_interaction, ..
+    } = template
+    else {
+        return false;
+    };
     if !is_building_effect(server, template) {
         return false;
     }
@@ -475,11 +481,13 @@ pub fn apply_effect(
     };
     if ops::craft_building(server, &player, &house, used_skill) {
         let template_id = house.data().unit.template_id;
-        crate::systems::quests::events::on_doodad_interaction(
+        crate::systems::quests::events::on_world_interaction(
             server,
             &player,
             &player,
             template_id,
+            *world_interaction as i32,
+            0,
         );
     }
     true

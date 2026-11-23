@@ -1180,9 +1180,9 @@ impl QuestData {
             |r| {
                 let count_player_kill = r.i32("count_pk")?;
                 let count_npc = r.i32("count_npc")?;
-                // Exception since we have 2 possible values here
+                // r208022 RVA 0x7e3440 sums both counters for objective kind 0x31.
                 Ok((
-                    count_npc.max(count_player_kill),
+                    count_npc + count_player_kill,
                     ObjZoneKill {
                         count_player_kill,
                         count_npc,

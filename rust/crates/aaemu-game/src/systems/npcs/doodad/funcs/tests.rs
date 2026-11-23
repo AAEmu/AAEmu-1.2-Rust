@@ -1281,3 +1281,18 @@ async fn loot_item_failure_with_room_keeps_the_invalid_item_error() {
         )]
     );
 }
+
+#[tokio::test]
+async fn quest_objective_doodad_report_descriptor_does_not_offer_inactive_quest() {
+    let mut fx = fixture(Rec::default());
+    fx.run(
+        FuncTemplate::Quest(DoodadFuncQuest {
+            id: 21,
+            quest_kind_id: 2,
+            quest_id: 61,
+        }),
+        0,
+        0,
+    );
+    assert!(fx.client.drain().is_empty());
+}
