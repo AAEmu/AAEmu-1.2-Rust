@@ -400,3 +400,8 @@ pub fn is_combuster_self_destruct_skill(skill_id: u32) -> bool {
 pub fn is_amed_cannon_controller(controller_id: u32) -> bool {
     super::rookborne::is_amed_cannon_controller(controller_id)
 }
+
+/// Whether a cast uses the Wind Sealstone launch skill.
+pub fn is_wind_sealstone_launch_skill(skill_id: u32) -> bool {
+    super::wind_sealstone::is_wind_sealstone_launch_skill(skill_id)
+}

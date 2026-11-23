@@ -21,6 +21,7 @@ mod red_dragon;
 pub mod registry;
 mod rookborne;
 pub mod sharpwind;
+mod wind_sealstone;
 mod windscour;
 
 #[cfg(test)]
