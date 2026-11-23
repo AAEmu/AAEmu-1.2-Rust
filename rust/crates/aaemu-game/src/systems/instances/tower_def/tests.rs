@@ -1001,7 +1001,15 @@ async fn tower_def_notices_follow_players_entering_the_event_group() {
     assert!(remote_ops.contains(&sc::SCTowerDefListPacket));
 
     traveler.data().unit.transform.zone_id = TEST_ZONE;
+    traveler.data().set_disabled_set_position(true);
     crate::world::session::on_zone_change(&server, &traveler, other_zone, TEST_ZONE);
+    assert!(!remote.drain_ops().contains(&sc::SCTowerDefStartPacket));
+    advance(3);
+    tick(&server);
+    assert!(!remote.drain_ops().contains(&sc::SCTowerDefStartPacket));
+    traveler.data().set_disabled_set_position(false);
+    advance(3);
+    tick(&server);
     let entered = remote.drain();
     assert!(entered
         .iter()

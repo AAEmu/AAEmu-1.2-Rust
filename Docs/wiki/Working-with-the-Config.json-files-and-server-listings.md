@@ -561,7 +561,8 @@ not remove loot before players can collect it. Removing an instance clears its c
 The `tower_def` spelling is also supported. Start, wave and end notices go to
 players in the event's zone group within its world instance. The server still
 sends the active event list throughout that world. On entering the event's zone
-group, players receive the start and current wave state for events already in progress.
+group, players receive the start and current wave state after a short delay for
+the client to finish loading.
 
 To schedule a verified definition, add this section to the game's `Config.Local.json`
 and replace the event identity with the values for its zone:

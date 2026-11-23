@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use tokio::time::Instant;
@@ -25,6 +26,8 @@ use super::packets::{
     SCTowerDefEndPacket, SCTowerDefListPacket, SCTowerDefStartPacket, SCTowerDefWaveStartPacket,
     TowerDefInfo, TowerDefKey,
 };
+
+const NOTICE_REPLAY_DELAY: Duration = Duration::from_secs(3);
 
 /// Client identity plus world instance (two instances may run the same definition).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,6 +103,7 @@ struct State {
     active: BTreeMap<EventKey, Event>,
     ever_started: bool,
     previous_clock: Option<(f32, i64, u64)>,
+    pending_notices: HashMap<u32, (Instant, u32, u32)>,
     scheduled_days: HashMap<EventKey, i64>,
     war_active: HashSet<EventKey>,
     /// Victory follow-ups (and the zone of the event that triggered them) waiting for the next
@@ -1216,6 +1220,7 @@ pub fn tick(server: &GameServer) {
             }
         }
     }
+    replay_zone_notices(server, now);
 }
 
 fn schedule_tick(server: &GameServer) {
@@ -1420,24 +1425,84 @@ pub fn send_zone_list(server: &GameServer, player: &PlayerRef, last_zone: u32) {
         .lock()
         .expect("tower defense poisoned")
         .ever_started;
-    if started {
-        let transform = player.data().unit.transform;
-        send_list(server, player);
-        let group = zone_group(server, transform.zone_id);
-        if group == zone_group(server, last_zone) {
-            return;
+    if !started {
+        return;
+    }
+    let transform = player.data().unit.transform;
+    send_list(server, player);
+    let Some(group) = zone_group(server, transform.zone_id) else {
+        return;
+    };
+    if Some(group) == zone_group(server, last_zone) {
+        return;
+    }
+    let mut state = manager(server)
+        .state
+        .lock()
+        .expect("tower defense poisoned");
+    let world = transform.instance_id;
+    if state
+        .active
+        .keys()
+        .any(|key| key.world_id == world && u32::from(key.zone_group_id) == group)
+    {
+        // r208022 drops notices sent with the teleport arrival burst. The same client
+        // accepted the end notice sent three seconds after arrival.
+        let ready_at = spawn_manager::now() + NOTICE_REPLAY_DELAY;
+        state
+            .pending_notices
+            .insert(player.character_id, (ready_at, world, group));
+    }
+}
+
+fn replay_zone_notices(server: &GameServer, now: Instant) {
+    let mut due = Vec::new();
+    manager(server)
+        .state
+        .lock()
+        .expect("tower defense poisoned")
+        .pending_notices
+        .retain(|&id, &mut (ready_at, world, group)| {
+            if now >= ready_at {
+                due.push((id, world, group));
+                false
+            } else {
+                true
+            }
+        });
+    for (id, world, group) in due {
+        let Some(player) = server.world.character_by_id(id) else {
+            continue;
+        };
+        let (transform, loading) = {
+            let c = player.data();
+            (c.unit.transform, c.disabled_set_position)
+        };
+        if transform.instance_id != world || zone_group(server, transform.zone_id) != Some(group) {
+            continue;
         }
-        let active: Vec<_> = manager(server)
+        let mut state = manager(server)
             .state
             .lock()
-            .expect("tower defense poisoned")
+            .expect("tower defense poisoned");
+        if state.pending_notices.contains_key(&id) {
+            continue;
+        }
+        let active: Vec<_> = state
             .active
             .iter()
-            .filter(|(key, _)| {
-                key.world_id == transform.instance_id && group == Some(u32::from(key.zone_group_id))
-            })
+            .filter(|(key, _)| key.world_id == world && u32::from(key.zone_group_id) == group)
             .map(|(key, event)| (key.wire(), event.zone_id, event.step))
             .collect();
+        if loading {
+            if !active.is_empty() {
+                state
+                    .pending_notices
+                    .insert(id, (now + NOTICE_REPLAY_DELAY, world, group));
+            }
+            continue;
+        }
+        drop(state);
         for (key, event_zone_id, step) in active {
             player.send(SCTowerDefStartPacket { key, event_zone_id });
             if step > 0 {
