@@ -312,6 +312,17 @@ pub fn summon_boss(sub_type: u32) -> Option<u32> {
     howling_abyss::summon_boss(sub_type)
 }
 
+/// `NpcSpawnerSpawnEffect`s whose adds attack the caster's aggro target (Burnt Castle Armory,
+/// Howling Abyss).
+pub fn is_wave_spawn(
+    caster_template: u32,
+    spawner_id: u32,
+    use_summoner_aggro_target: bool,
+) -> bool {
+    armory::is_wave_spawn(caster_template, spawner_id, use_summoner_aggro_target)
+        || howling_abyss::is_wave_spawn(caster_template, spawner_id, use_summoner_aggro_target)
+}
+
 // ---- physics and collision
 
 /// Worlds whose water bodies are kept per instance instead of per world template (Howling
