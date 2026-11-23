@@ -13,7 +13,7 @@ use crate::systems::npcs::doodad::templates::{DoodadFuncSpawnGimmick, DoodadFunc
 use crate::systems::npcs::gimmick::manager::SpawnGimmickParams;
 use crate::systems::skills::controllers::Vec3;
 use crate::systems::skills::data::effects::SpawnGimmickEffect;
-use crate::systems::skills::data::{EffectKind, SkillTemplate};
+use crate::systems::skills::data::{EffectKind, SkillControllerTemplate, SkillTemplate};
 use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::geometry::Target;
 use crate::systems::skills::state::SkillRef;
@@ -142,6 +142,16 @@ pub trait Encounter: Sync {
         _target: &Target,
     ) -> Option<(EffectKind, u32)> {
         None
+    }
+
+    /// A controller applied to a player whose movement is driven by the client.
+    fn on_player_skill_controller(
+        &self,
+        _server: &GameServer,
+        _t: &SkillControllerTemplate,
+        _caster: &WorldObject,
+        _player: &PlayerRef,
+    ) {
     }
 
     /// A `KnockBack` of a player, from `target_pos` to `end`: `true` when the encounter sent
