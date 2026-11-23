@@ -1,5 +1,4 @@
 use crate::systems::instances::encounters::hooks as encounter_hooks;
-use crate::systems::instances::encounters::registry as encounters;
 use crate::systems::skills::buffs;
 use crate::systems::skills::controllers::{calculate_distance, Vec3};
 use crate::world::{now_ms, WorldObject};
@@ -200,7 +199,9 @@ pub(super) fn move_in_range(
     if t.use_range_mod && max_weapon_range != 0.0 {
         range *= max_weapon_range;
     }
-    range = encounters::melee_chase_range(&t, range);
+    if t.base_skill_id == 2 && t.skills_count == 0 && range == 4.0 {
+        range -= 1.0; // Fix that ID=7927, Plateau Earth Elemental can hit with a melee attack
+    }
     let distance_to_target = match target {
         Some(t) => npc::distance_to(c.server, &c.obj, t, true),
         None => 0.0,

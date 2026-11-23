@@ -365,14 +365,6 @@ pub fn door_reuses_closed_mesh(template_id: u32, func_group: u32) -> bool {
 
 // ---- World content
 
-/// Adjust the computed chase range for the melee stats used by Plateau Earth Elemental.
-pub(crate) fn melee_chase_range(
-    t: &crate::systems::ai::behaviors::TemplateScalars,
-    range: f32,
-) -> f32 {
-    super::plateau::melee_chase_range(t, range)
-}
-
 /// Whether a world with the instance prefix keeps its inactive-at-start spawners.
 pub fn keeps_inactive_spawners(world_name: &str) -> bool {
     super::library::keeps_inactive_spawners(world_name)

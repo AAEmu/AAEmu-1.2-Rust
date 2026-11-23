@@ -204,14 +204,13 @@ struct NoEncounter;
 
 impl Encounter for NoEncounter {}
 
-static ALL: [&dyn Encounter; 13] = [
+static ALL: [&dyn Encounter; 12] = [
     &armory::Armory,
     &palace_cellar::PalaceCellar,
     &hadir::HadirFarm,
     &sharpwind::SharpwindMines,
     &cradle::KroloalCradle,
     &howling_abyss::HowlingAbyss,
-    &super::plateau::Plateau,
     &super::library::Library,
     &super::red_dragon::RedDragon,
     &super::halcyona::Halcyona,

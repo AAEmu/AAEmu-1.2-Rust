@@ -61,7 +61,7 @@ pub use self::roaming::calc_next_roaming_position;
 pub(crate) use self::skill_use::is_using_skill;
 pub use self::skill_use::{on_skill_ended, pick_skill_and_use_it, use_skill};
 pub use self::support::npc_move_towards;
-pub(crate) use self::support::{base_move_speed, delta_seconds, owner_pos, TemplateScalars};
+pub(crate) use self::support::{base_move_speed, delta_seconds, owner_pos};
 pub use self::targeting::set_target;
 
 #[cfg(test)]
