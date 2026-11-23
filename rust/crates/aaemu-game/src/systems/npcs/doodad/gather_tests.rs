@@ -1461,3 +1461,103 @@ async fn fruit_pick_advances_the_apple_tree_to_the_loot_group_and_back() {
     assert_eq!(fx.advance(APPLE_TIMER_MS as u64), 1);
     assert_eq!(d.data().func_group_id, APPLE_PICK);
 }
+
+#[tokio::test]
+async fn paid_puzzle_prize_survives_full_bag_and_is_claimed_once() {
+    use crate::systems::economy::loot_data::{Loot, LootPack};
+
+    const PUZZLE: u32 = 105;
+    const START: u32 = 40;
+    const OUTCOME: u32 = 41;
+    const FINISH: u32 = 42;
+    const PACK: u32 = 77;
+    let mut data = game_data();
+    let drops = vec![Loot {
+        item_id: ORE,
+        min_amount: 1,
+        max_amount: 1,
+        always_drop: true,
+        ..Default::default()
+    }];
+    data.systems.economy.loot.packs.insert(
+        PACK,
+        LootPack {
+            id: PACK,
+            loots: drops.clone(),
+            loots_by_group_no: vec![(0, drops)],
+            ..Default::default()
+        },
+    );
+    data.systems.npcs.doodad = DoodadBuilder::default()
+        .template(PUZZLE, &[(START, 1), (OUTCOME, 2), (FINISH, 2)])
+        .func(
+            START,
+            FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll {
+                id: 1,
+                item_id: WOOL,
+                count: 1,
+            }),
+            OUTCOME as i32,
+        )
+        .skill(START, GENERIC_USE_SKILL)
+        .phase_func(
+            OUTCOME,
+            FuncTemplate::PuzzleOut(DoodadFuncPuzzleOut {
+                id: 1,
+                group_id: u32::MAX,
+                ratio: 100.0,
+                loot_pack_id: PACK,
+                next_phase: FINISH as i32,
+                delay: 100,
+                ..Default::default()
+            }),
+        )
+        .data;
+    let mut fx = fx_with(data);
+    let puzzle = fx.doodad(PUZZLE);
+    let mut txn = crate::systems::economy::inventory::ItemTxn::begin(&fx.server);
+    Inv::of(&fx.player)
+        .bag()
+        .lock()
+        .unwrap()
+        .acquire_default_item(task_type::DOODAD_INTERACTION, WOOL, 2, 0, 0, &mut txn.env);
+    drop(txn);
+    fx.bag_size(1);
+
+    fx.cast(GENERIC_USE_SKILL, &puzzle);
+    assert_eq!(fx.count(WOOL), 1);
+    assert_eq!(puzzle.data().func_group_id, OUTCOME);
+    assert_eq!(fx.advance(100), 1);
+    assert!(puzzle.data().phase.pending_loot.is_some());
+    assert!(has_bag_full(&fx.client.drain()));
+    assert_eq!(fx.count(ORE), 0);
+
+    let other = TestClient::new(&fx.server, 2, 1002);
+    let other_player = spawn_player(
+        &fx.server,
+        &other,
+        test_character(2, "Other player", 100.0, 100.0),
+        0x101,
+    );
+    let world = fx.server.world.world(0).unwrap();
+    manager::use_doodad(
+        &fx.server,
+        &world,
+        &puzzle,
+        Some(&crate::world::WorldObject::from(&other_player)),
+        GENERIC_USE_SKILL,
+        START as i32,
+    );
+    assert_eq!(Inv::of(&other_player).items_count(ORE, -1), 0);
+    assert!(puzzle.data().phase.pending_loot.is_some());
+
+    fx.bag_size(2);
+    fx.cast(GENERIC_USE_SKILL, &puzzle);
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 1);
+    assert_eq!(puzzle.data().func_group_id, FINISH);
+    assert!(puzzle.data().phase.pending_loot.is_none());
+    fx.cast(GENERIC_USE_SKILL, &puzzle);
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 1);
+}

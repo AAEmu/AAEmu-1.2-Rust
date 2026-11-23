@@ -522,6 +522,10 @@ fn use_doodad_with_gate(
         }
     }
 
+    if super::tasks::retry_puzzle_prize(ctx, caster) {
+        return;
+    }
+
     if func_group_id > 0 {
         if !crate::systems::instances::mentoring::allows_phase_request(ctx, func_group_id) {
             return;
@@ -529,6 +533,7 @@ fn use_doodad_with_gate(
         set_func_group_id(server, &ctx.doodad, func_group_id as u32);
     }
 
+    let mut interaction = DoodadCtx::new(server, ctx.world.clone(), ctx.doodad.clone());
     let mut chained = false;
     loop {
         let (template_id, current) = {
@@ -538,6 +543,8 @@ fn use_doodad_with_gate(
             d.phase.list_group_id.clear();
             (d.template_id, d.func_group_id)
         };
+        interaction.interaction_group = Some(current);
+        let ctx = &interaction;
         tracing::trace!(
             "Use: TemplateId {template_id}, Using phase {current} with SkillId {skill_id}"
         );
@@ -656,7 +663,7 @@ fn use_doodad_with_gate(
 /// (and its regrowth timer) through the normal `DoChangePhase` after the loop. The next phase
 /// was never entered (its phase funcs did not run and no `SCDoodadPhaseChanged` was sent), so
 /// only the group is restored.
-fn keep_pending_loot_in(ctx: &DoodadCtx<'_>, loot_group: u32) {
+pub(super) fn keep_pending_loot_in(ctx: &DoodadCtx<'_>, loot_group: u32) {
     let pending = {
         let mut d = ctx.doodad.data();
         if d.phase.deleted || d.func_group_id == loot_group {
@@ -1085,6 +1092,12 @@ pub(super) fn do_change_phase_at(
     if next_phase <= 0 {
         return false;
     }
+    if matches!(
+        ctx.doodad.data().phase.pending_loot,
+        Some(crate::models::doodad::PendingDoodadLoot::Puzzle { .. })
+    ) {
+        return true;
+    }
     tracing::trace!(
         "DoChangePhase: ObjId {}, nextPhase {next_phase}",
         ctx.doodad.obj_id
@@ -1095,6 +1108,11 @@ pub(super) fn do_change_phase_at(
         ctx.doodad.data().phase.override_phase_time_ms = 0;
     }
     // the phase change packet must be after the phase functions (correct FuncGroupId)
+    broadcast_phase(ctx);
+    stop
+}
+
+pub(super) fn broadcast_phase(ctx: &DoodadCtx<'_>) {
     let packet = {
         let d = ctx.doodad.data();
         (!d.phase.deleted).then(|| SCDoodadPhaseChangedPacket::new(ctx.doodad.obj_id, &d, now_ms()))
@@ -1102,7 +1120,6 @@ pub(super) fn do_change_phase_at(
     if let Some(p) = packet {
         ctx.broadcast(&p);
     }
-    stop
 }
 
 /// `OnSkillHit(caster, skillId)`: a matching skill contributes one hit to the current phase.

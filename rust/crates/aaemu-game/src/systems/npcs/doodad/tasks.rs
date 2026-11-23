@@ -18,9 +18,11 @@ use std::time::Duration;
 use super::phase;
 use super::runtime::DoodadCtx;
 use super::spawner::DoodadSpawner;
+use crate::models::{doodad::PendingDoodadLoot, item_task::task_type};
 use crate::server::GameServer;
+use crate::systems::economy::{error_message, loot::GeneratedLoot};
 use crate::systems::npcs::area_trigger::{self, AreaTrigger};
-use crate::world::{now_ms, DoodadRef, WorldInstance, WorldObject};
+use crate::world::{now_ms, DoodadRef, PlayerRef, WorldInstance, WorldObject};
 
 /// What a scheduled doodad task does when it fires.
 #[derive(Debug, Clone)]
@@ -34,6 +36,7 @@ pub enum FuncTaskKind {
     /// Complete the single outcome selected from the 1.2 puzzle-out rows.
     PuzzleOutcome {
         token: u64,
+        interaction_group: Option<u32>,
         next_phase: i32,
         loot_pack_id: u32,
     },
@@ -312,12 +315,82 @@ pub(super) fn start_puzzle_outcome(
             generation: 0,
             kind: FuncTaskKind::PuzzleOutcome {
                 token,
+                interaction_group: ctx.interaction_group,
                 next_phase: outcome.next_phase,
                 loot_pack_id: outcome.loot_pack_id,
             },
         },
         ms(f64::from(outcome.delay)),
     );
+}
+
+/// Claims the payer's pending roll before another interaction can select or charge for
+/// a new outcome. Like a loot-pack func, a paid outcome runs its successor only after
+/// delivery. Compact groups 14844/14845 illustrate why the original interaction group
+/// is shown during a retry: the outcome group has no client action.
+pub(super) fn retry_puzzle_prize(ctx: &DoodadCtx<'_>, caster: &WorldObject) -> bool {
+    let player = caster.as_player();
+    let pending = {
+        let mut doodad = ctx.doodad.data();
+        if doodad.phase.puzzle_task != 0 {
+            return true;
+        }
+        match doodad.phase.pending_loot.as_ref() {
+            Some(PendingDoodadLoot::Puzzle { character_id, .. }) => {
+                if !player.is_some_and(|p| p.character_id == *character_id) {
+                    return true;
+                }
+                doodad.phase.pending_loot.take()
+            }
+            _ => return false,
+        }
+    };
+    if let (
+        Some(PendingDoodadLoot::Puzzle {
+            loot_pack_id,
+            next_phase,
+            roll,
+            ..
+        }),
+        Some(player),
+    ) = (pending, player)
+    {
+        if deliver_puzzle_prize(ctx, player, loot_pack_id, next_phase, Some(roll)) {
+            phase::do_change_phase(ctx, Some(caster), next_phase);
+        }
+    }
+    true
+}
+
+fn deliver_puzzle_prize(
+    ctx: &DoodadCtx<'_>,
+    player: &PlayerRef,
+    loot_pack_id: u32,
+    next_phase: i32,
+    mut roll: Option<Vec<GeneratedLoot>>,
+) -> bool {
+    match super::funcs::economy(ctx.server).give_doodad_loot_pack(
+        ctx.server,
+        player,
+        loot_pack_id,
+        0,
+        task_type::LOOT_ALL,
+        &mut roll,
+    ) {
+        Some(true) => return true,
+        Some(false) => player.send(super::packets::error_msg(error_message::BAG_FULL)),
+        None => tracing::error!(loot_pack_id, "Puzzle outcome loot pack unavailable"),
+    }
+    let Some(roll) = roll else {
+        return true;
+    };
+    ctx.doodad.data().phase.pending_loot = Some(PendingDoodadLoot::Puzzle {
+        character_id: player.character_id,
+        loot_pack_id,
+        next_phase,
+        roll,
+    });
+    false
 }
 
 /// `doodad.FuncTask.Cancel(); Task.Run(doodad.FuncTask.ExecuteAsync)` (`/tickdoodad`): runs the
@@ -490,6 +563,7 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
     match task.kind {
         FuncTaskKind::PuzzleOutcome {
             token,
+            interaction_group,
             next_phase,
             loot_pack_id,
         } => {
@@ -501,7 +575,14 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
                 doodad.phase.puzzle_task = 0;
             }
             if let Some(player) = DoodadCtx::as_player(caster).filter(|_| loot_pack_id != 0) {
-                super::funcs::economy(server).give_loot_pack(server, player, loot_pack_id);
+                if !deliver_puzzle_prize(&ctx, player, loot_pack_id, next_phase, None) {
+                    if let Some(group) = interaction_group {
+                        cancel_func_task(&ctx.doodad);
+                        phase::keep_pending_loot_in(&ctx, group);
+                        phase::broadcast_phase(&ctx);
+                    }
+                    return;
+                }
             }
             if next_phase > 0 {
                 phase::do_change_phase(&ctx, caster, next_phase);

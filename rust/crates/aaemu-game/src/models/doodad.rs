@@ -419,6 +419,12 @@ pub(crate) enum PendingDoodadLoot {
         func_id: u32,
         count: i32,
     },
+    Puzzle {
+        character_id: u32,
+        loot_pack_id: u32,
+        next_phase: i32,
+        roll: Vec<crate::systems::economy::loot::GeneratedLoot>,
+    },
     Pack {
         func_id: u32,
         /// Quest drops and actability rolls are specific to the opener.
@@ -431,6 +437,7 @@ impl PendingDoodadLoot {
         match self {
             Self::Item { func_id, .. } => func_type == "DoodadFuncLootItem" && *func_id == id,
             Self::Pack { func_id, .. } => func_type == "DoodadFuncLootPack" && *func_id == id,
+            Self::Puzzle { .. } => false,
         }
     }
 }

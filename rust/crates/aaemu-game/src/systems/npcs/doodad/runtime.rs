@@ -15,6 +15,7 @@ pub struct DoodadCtx<'a> {
     pub world: Arc<WorldInstance>,
     pub doodad: DoodadRef,
     pub(super) carries_phase_requester: bool,
+    pub(super) interaction_group: Option<u32>,
 }
 
 impl<'a> DoodadCtx<'a> {
@@ -24,6 +25,7 @@ impl<'a> DoodadCtx<'a> {
             world,
             doodad,
             carries_phase_requester: true,
+            interaction_group: None,
         }
     }
 
