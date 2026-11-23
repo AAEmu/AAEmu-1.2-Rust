@@ -77,8 +77,10 @@ function Stop-OwnedMySql($Ini) {
     }
 }
 function Call-Dev($Command, $Payload = @{}) {
+    if ($gameClient.HasExited) { throw "Client exited ($($gameClient.ExitCode)) before $Command. See the client log and crash directory." }
     $json = $Payload | ConvertTo-Json -Compress
     $r = & "$dev\tools\aadev-call.ps1" -ClientPid $gameClient.Id -TimeoutMs 5000 $Command $json | ConvertFrom-Json
+    if ($null -eq $r) { throw "Dev pipe returned no response to $Command. See the client log and crash directory." }
     if (-not $r.ok) { throw "$Command failed: $($r.error)" }
     $r
 }
@@ -350,14 +352,13 @@ try {
             }
             Measure-Route
             $result = Get-Content "$run\summary.json" -Raw | ConvertFrom-Json
-            $result | Add-Member -NotePropertyName run -NotePropertyValue (Split-Path -Leaf $run)
-            $results.Add($result)
             @("# $Config / $Scenario / $Preset", '', "Bots ready $n. Frames $($result.frames), missed $($result.missed_frames).",
                 "Present p50 $($result.p50_ms) ms, p95 $($result.p95_ms) ms, p99 $($result.p99_ms) ms, max $($result.max_ms) ms.") |
                 Set-Content "$run\README.md" -Encoding UTF8
         } catch {
-            $_.Exception.Message | Set-Content "$run\failure.txt"
-            throw
+            $failure = $_.Exception.Message
+            $failure | Set-Content "$run\failure.txt"
+            Write-Warning "Attempt $rep of ${Repeat}: $failure"
         } finally {
             Remove-Item Env:AAEMU_STRESS_PASSWORD -ErrorAction SilentlyContinue
             for ($i=$owned.Count - 1; $i -ge 0; $i--) {
@@ -378,8 +379,20 @@ try {
                 }
             }
         }
+        if (Test-Path -LiteralPath "$run\summary.json") {
+            $result = Get-Content "$run\summary.json" -Raw | ConvertFrom-Json
+        } else {
+            $result = [pscustomobject]@{config=$Config;scenario=$Scenario;preset=$Preset;bots=$n;complete=$false}
+        }
+        $result | Add-Member -NotePropertyName run -NotePropertyValue (Split-Path -Leaf $run)
+        $result | Add-Member -NotePropertyName failure -NotePropertyValue $failure
+        $results.Add($result)
+        $failure = $null
     }
-    $results.ToArray() | Export-Csv (Join-Path $Output "series-$series.tsv") -Delimiter "`t" -NoTypeInformation
+    $results.ToArray() | Select-Object run,config,scenario,preset,bots,complete,frames,missed_frames,
+        p50_ms,p95_ms,p99_ms,max_ms,hitches_over_50_ms,login_to_world_ms,peak_virtual_bytes,peak_private_bytes,
+        smallest_free_block_mib,failure |
+        Export-Csv (Join-Path $Output "series-$series.tsv") -Delimiter "`t" -NoTypeInformation
     $valid = @($results | Where-Object { $_.complete -and $_.frames -and -not $_.missed_frames })
     $lines = @("# $Config / $Scenario / $Preset", '', "Bots $n. Complete captures $($valid.Count) of $Repeat.", '',
         '| Metric | Median across runs | Min | Max |', '| --- | ---: | ---: | ---: |')
@@ -391,6 +404,7 @@ try {
         }
     }
     $lines | Set-Content (Join-Path $Output "series-$series.md") -Encoding UTF8
+    if (-not $valid.Count) { throw "No complete captures in series $series. See the attempt directories." }
 } finally {
     $lease.ReleaseMutex()
     $lease.Dispose()
