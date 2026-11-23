@@ -372,3 +372,8 @@ pub(crate) fn melee_chase_range(
 ) -> f32 {
     super::plateau::melee_chase_range(t, range)
 }
+
+/// Whether a world with the instance prefix keeps its inactive-at-start spawners.
+pub fn keeps_inactive_spawners(world_name: &str) -> bool {
+    super::library::keeps_inactive_spawners(world_name)
+}

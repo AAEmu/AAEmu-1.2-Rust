@@ -13,6 +13,7 @@ pub mod cradle;
 pub mod hadir;
 pub mod hooks;
 pub mod howling_abyss;
+mod library;
 pub mod palace_cellar;
 mod plateau;
 pub mod registry;
