@@ -601,9 +601,8 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     let palace_flame = clout == Some(CloutClass::PalaceFlame);
     // An NPC skill summoned this doodad, and the clout uses that NPC as its source
     // (Kroloal Cradle's Miasma, Poison Belch and Toxic Globe). See `npc_origin_clout`.
-    // The encounter areas handled above keep their own caster and payload rules (the
-    // Burnt Castle Howl ward is summoned by its marker NPC, and its protection runs as
-    // the doodad).
+    // Encounter areas above keep their own caster rules. The Burnt Castle Howl ward is
+    // summoned by its marker NPC and casts protection from the doodad.
     let npc_origin = !(is_fish_school
         || howl_ward
         || howling_hazard
@@ -711,7 +710,7 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     // without a unit source. Restrict an explicitly supplied unit that was lost as a source
     // too, since the doodad cannot tell its side.
     use area_trigger::skill_target_relation::{FRIENDLY, HOSTILE};
-    let sided_owner = trigger_caster.obj_id() == owner_obj_id
+    let uses_owner_relation = trigger_caster.obj_id() == owner_obj_id
         && matches!(trigger.target_relation, FRIENDLY | HOSTILE)
         && crate::systems::social::nation::faction_exists(
             server,
@@ -720,19 +719,7 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
     let lost_unit_source = supplied_unit_id.is_some_and(|id| id != trigger_caster.obj_id());
     trigger.effects_per_buff = match inside_buff_id {
         Some(_) => HashMap::from([(f.buff_id, f.effects.clone())]),
-        // An NPC's hazard picks its side through the relation, so its damage and debuffs
-        // reach the NPC's enemies (a Friendly one its allies). An Any / Others area would
-        // also take the NPC and its allies and stays limited to its beneficial buffs.
-        None if npc_origin
-            && matches!(
-                f.target_relation,
-                area_trigger::skill_target_relation::FRIENDLY
-                    | area_trigger::skill_target_relation::HOSTILE
-            ) =>
-        {
-            HashMap::from([(0, f.effects.clone())])
-        }
-        None if (owner_obj_id != 0 && !sided_owner) || lost_unit_source => {
+        None if (owner_obj_id != 0 && !uses_owner_relation) || lost_unit_source => {
             HashMap::from([(0, good_buff_effects(server, &f.effects))])
         }
         None => HashMap::from([(0, f.effects.clone())]),
