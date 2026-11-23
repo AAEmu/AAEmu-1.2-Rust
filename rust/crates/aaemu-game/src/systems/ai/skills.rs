@@ -77,7 +77,15 @@ pub fn np_skill(c: &AiCtx<'_>, skill_id: u32, kind: SkillUseConditionKind) -> Op
     {
         return None;
     }
-    Some(SkillRun::new(t, 1))
+    // Combat and alert reactions belong to the behavior that raised them: a mob settling back
+    // into Idle drops them as before (27 of the 37 1.2 `InAlert` rows have a cast time). Spawn,
+    // idle, death and despawn skills are authored events and survive the settle.
+    Some(match kind {
+        SkillUseConditionKind::InCombat | SkillUseConditionKind::InAlert => {
+            SkillRun::new_ai_chosen(t)
+        }
+        _ => SkillRun::new(t, 1),
+    })
 }
 
 /// `template.TargetType == SkillTargetType.Self`.
