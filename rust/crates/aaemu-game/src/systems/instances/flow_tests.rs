@@ -111,12 +111,27 @@ fn build_server(
 }
 
 fn build_server_with(
-    mut data: GameData,
+    data: GameData,
     mut templates: Vec<WorldTemplate>,
     lookups: Vec<WorldSpawnLocation>,
     app_path: Option<&Path>,
     adjust: impl FnOnce(&mut AppConfig),
 ) -> Arc<GameServer> {
+    templates.insert(
+        0,
+        WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
+    );
+    let worlds = WorldTemplates::from_templates(templates, lookups).expect("worlds");
+    build_server_in_worlds(data, worlds, app_path, adjust)
+}
+
+fn build_server_in_worlds(
+    mut data: GameData,
+    worlds: WorldTemplates,
+    app_path: Option<&Path>,
+    adjust: impl FnOnce(&mut AppConfig),
+) -> Arc<GameServer> {
+    data.worlds = worlds;
     let mut config = AppConfig {
         id: 1,
         ..AppConfig::default()
@@ -131,11 +146,6 @@ fn build_server_with(
     let db = MySqlPoolOptions::new()
         .acquire_timeout(Duration::from_millis(200))
         .connect_lazy_with(config.connections.mysql_provider.connect_options());
-    templates.insert(
-        0,
-        WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
-    );
-    data.worlds = WorldTemplates::from_templates(templates, lookups).expect("worlds");
     for id in UNIT_STATE_FORCED_BUFFS {
         let mut t = BuffTemplate::simple(id, BuffKind::Good);
         t.duration = 0;
@@ -3607,17 +3617,16 @@ async fn real_armory_spawn_and_both_exit_doodad_flows() {
         .find(|l| l.name.as_deref() == Some("instance_burntcastle_armory"))
         .and_then(|l| l.spawn_position)
         .unwrap();
-    let server = build_server(
-        data,
-        vec![instance_template(
-            1,
-            "instance_burntcastle_armory",
-            236,
-            spawn,
-        )],
+    // This fixture needs the Armory's exterior zone for the Return gate's world lookup.
+    let templates = WorldTemplates::from_templates(
+        vec![
+            WorldTemplate::synthetic(0, "main_world", 16, 13, 257),
+            instance_template(1, "instance_burntcastle_armory", 236, spawn),
+        ],
         lookups,
-        Some(&app_path),
-    );
+    )
+    .expect("worlds");
+    let server = build_server_in_worlds(data, templates, Some(&app_path), |_| {});
     crate::systems::npcs::install_hooks(&server);
     crate::systems::skills::bind(&server);
     let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
@@ -3664,7 +3673,7 @@ async fn real_armory_spawn_and_both_exit_doodad_flows() {
     use_exit_func(&server, &a.p);
     assert_eq!(a.instance(), 0);
     let t = a.p.data().unit.transform;
-    assert_eq!((t.zone_id, t.x, t.y, t.z), (TEST_ZONE, 100.0, 100.0, 100.0));
+    assert_eq!((t.zone_id, t.x, t.y, t.z), (257, 100.0, 100.0, 100.0));
     assert!(a
         .frames()
         .iter()
@@ -3730,7 +3739,7 @@ async fn real_armory_spawn_and_both_exit_doodad_flows() {
         player.frames();
         if template_id == 4923 {
             assert_eq!(exit.data().func_group_id, 12256);
-            cast_armory_exit(&server, &mut player, exit.obj_id).await;
+            cast_doodad_skill(&server, &mut player, indun::ARMORY_EXIT_SKILL, exit.obj_id).await;
             assert!(!player.ops().contains(&sc::SCLoadInstancePacket));
             assert_eq!(player.instance(), instance);
             let ctx = DoodadCtx::of(&server, &exit).unwrap();
@@ -3750,7 +3759,7 @@ async fn real_armory_spawn_and_both_exit_doodad_flows() {
             data.func_template(func.func_id, &func.func_type),
             Some(FuncTemplate::Use(_))
         ));
-        cast_armory_exit(&server, &mut player, exit.obj_id).await;
+        cast_doodad_skill(&server, &mut player, indun::ARMORY_EXIT_SKILL, exit.obj_id).await;
         let load = load_instance(
             0,
             gate.zone_id,
@@ -4314,18 +4323,133 @@ async fn battlefield_resurrection_without_delay_keeps_six_seconds() {
 const RETURN_GATE_INSTANCE: u32 = 6001;
 const RETURN_GATE_MAIN: u32 = 6002;
 const RETURN_GATE_DISTANT: u32 = 6003;
+const RETURN_GATE_FOREIGN: u32 = 6004;
 const RETURN_SKILL: u32 = 24979;
 
-async fn cast_armory_exit(server: &GameServer, player: &mut Pc, doodad_id: u32) {
+async fn cast_doodad_skill(server: &GameServer, player: &mut Pc, skill_id: u32, doodad_id: u32) {
     use crate::systems::skills::types::{SkillCastTarget, SkillCaster};
     let mut cast = PacketStream::new();
-    cast.write_u32(indun::ARMORY_EXIT_SKILL);
+    cast.write_u32(skill_id);
     SkillCaster::Unit(player.p.obj_id).write(&mut cast);
     SkillCastTarget::Doodad(doodad_id).write(&mut cast);
     cast.write_u8(0);
     player
         .frame(server, cs::CSStartSkillPacket, cast.as_bytes())
         .await;
+}
+
+/// The real 1.2 Diamond Shores Door leaves a Library channel at its authored exterior gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs AAEMU_COMPACT_DB and AAEMU_GAME_PAK"]
+async fn real_library_exit_door_loads_gate_614_in_main_world() {
+    let db = std::env::var("AAEMU_COMPACT_DB").expect("AAEMU_COMPACT_DB");
+    let pak = std::env::var("AAEMU_GAME_PAK").expect("AAEMU_GAME_PAK");
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    let files = crate::data::client_files::ClientFileManager::from_sources(&[pak], &app);
+    let ctx = crate::systems::DataLoadCtx {
+        conn: &conn,
+        app_path: &app,
+        files: &files,
+        language: "en_us",
+    };
+    let mut data = GameData::empty();
+    data.zones = ZoneData::load(&conn).expect("zones");
+    // This flow represents a server with Diamond Shores open. The compact row closes it.
+    data.zones.zones.get_mut(&301).unwrap().closed = false;
+    data.systems.npcs = crate::systems::npcs::Data::load(&ctx).expect("NPC data");
+    data.systems.instances = super::Data::load(&ctx).expect("instance data");
+    data.systems.skills = crate::systems::skills::Data::load(&ctx).expect("skill effects");
+    data.skills = crate::data::skills::SkillData::load(&conn).expect("skill sources");
+    let templates = WorldTemplates::load(&files, &app).expect("1.2 world templates");
+    let server = build_server_in_worlds(data, templates, Some(&app), |_| {});
+    crate::systems::npcs::install_hooks(&server);
+    crate::systems::skills::bind(&server);
+
+    let gate = crate::systems::npcs::portal::world_gates_by_id(&server, 614).unwrap();
+    assert_eq!(
+        (gate.zone_id, gate.x, gate.y, gate.z),
+        (301, 19547.7, 27144.3, 131.3)
+    );
+    let main = server.world.world(0).unwrap();
+    assert_eq!(main.zone_id_at(gate.x, gate.y), gate.zone_id);
+
+    let mut player = Pc::new(&server, 1, "Library", gate.x + 10.0, gate.y);
+    player.p.data().unit.level = 55;
+    let dungeon =
+        indun::create_system_instance(&server, Some(&player.p), LIB_ZONE_KEY, 0, false, 0)
+            .expect("Library channel");
+    await_loader(&dungeon).await;
+    let inside = dungeon.world(&server).unwrap();
+    assert_eq!(inside.template.name, "instance_library");
+    assert_eq!(player.instance(), inside.id);
+    player.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+
+    let exit = inside
+        .all_doodads()
+        .into_iter()
+        .find(|d| d.data().template_id == 7450)
+        .expect("Diamond Shores Door");
+    assert_eq!(exit.data().func_group_id, 20405);
+    let position = inside.world_pos_rot(&WorldObject::from(&exit));
+    worlds::apply_world_spawn_position(
+        &server,
+        &player.p,
+        &WorldSpawnPosition {
+            zone_id: LIB_ZONE_KEY,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            ..Default::default()
+        },
+        inside.id,
+    );
+    player.frames();
+
+    cast_doodad_skill(&server, &mut player, 24357, exit.obj_id).await;
+    let load = load_instance(
+        0,
+        gate.zone_id,
+        gate.x,
+        gate.y,
+        gate.z,
+        (0.0, 0.0, worlds::deg_to_rad(gate.yaw)),
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frames = player.frames();
+            assert!(
+                !frames.iter().any(|(op, _)| *op == sc::SCErrorMsgPacket),
+                "Library exit reported an error: {frames:?}"
+            );
+            if frames.contains(&(sc::SCLoadInstancePacket, load.clone())) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Library exit must load gate 614");
+    let t = player.p.data().unit.transform;
+    assert_eq!(
+        (t.instance_id, t.zone_id, t.x, t.y, t.z),
+        (0, gate.zone_id, gate.x, gate.y, gate.z)
+    );
+    assert!(inside.object(player.p.obj_id).is_none());
+    assert!(main.object(player.p.obj_id).is_some());
+    assert_eq!(
+        server
+            .systems
+            .instances
+            .events
+            .characters
+            .count(&player.p, CharEvent::DungeonLeave),
+        0
+    );
+    player.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    assert_eq!(player.p.region().unwrap().0, 0);
 }
 
 fn return_gate_data() -> GameData {
@@ -4349,7 +4473,7 @@ fn return_gate_data() -> GameData {
             gate(RETURN_GATE_INSTANCE, DUNGEON_ZONE, 220.0),
             gate(RETURN_GATE_MAIN, TEST_ZONE, 120.0),
             gate(RETURN_GATE_DISTANT, DUNGEON_ZONE, 1300.0),
-            gate(320, 257, 125.0),
+            gate(RETURN_GATE_FOREIGN, MIRAGE_ZONE, 125.0),
         ],
         vec![],
         vec![],
@@ -4383,10 +4507,6 @@ fn return_gate_data() -> GameData {
 }
 
 fn cast_return(server: &GameServer, p: &PlayerRef, gate_id: i32) {
-    cast_return_with_skill(server, p, RETURN_SKILL, gate_id);
-}
-
-fn cast_return_with_skill(server: &GameServer, p: &PlayerRef, skill_id: u32, gate_id: i32) {
     use crate::systems::skills::effects::{EffectArgs, EffectSource};
     use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
     let caster = WorldObject::from(p);
@@ -4395,7 +4515,10 @@ fn cast_return_with_skill(server: &GameServer, p: &PlayerRef, skill_id: u32, gat
         caster_caster: SkillCaster::Unit(p.obj_id),
         target: crate::systems::skills::geometry::Target::Obj(caster),
         target_caster: SkillCastTarget::Unit(p.obj_id),
-        cast: CastAction::Skill { skill_id, tl_id: 1 },
+        cast: CastAction::Skill {
+            skill_id: RETURN_SKILL,
+            tl_id: 1,
+        },
         source: EffectSource::default(),
         skill_object: &SkillObject::None,
     };
@@ -4415,8 +4538,7 @@ async fn enter_dungeon(server: &Arc<GameServer>, a: &mut Pc) {
     assert_eq!(a.instance(), 100);
 }
 
-/// A gate id without data, or a gate of a main-world zone, never ejects a player from its
-/// instance: error 439, no `SCLoadInstance`, transform unchanged.
+/// A missing gate or a gate in a different instance template keeps the player in place.
 #[tokio::test]
 async fn return_without_usable_gate_keeps_the_player_in_the_instance() {
     let server = build_return_server();
@@ -4425,7 +4547,7 @@ async fn return_without_usable_gate_keeps_the_player_in_the_instance() {
     let before = a.p.data().unit.transform;
     assert!(a.p.data().main_world_position.is_some());
 
-    for gate in [7777, RETURN_GATE_MAIN as i32, 320] {
+    for gate in [7777, RETURN_GATE_FOREIGN as i32] {
         cast_return(&server, &a.p, gate);
         let ops = a.ops();
         assert!(!ops.contains(&sc::SCLoadInstancePacket), "gate {gate}");
@@ -4436,12 +4558,10 @@ async fn return_without_usable_gate_keeps_the_player_in_the_instance() {
 }
 
 #[tokio::test]
-async fn armory_exit_cleans_up_dungeon_membership_only_for_an_open_gate() {
+async fn return_exit_cleans_up_dungeon_membership_only_for_an_open_gate() {
     for closed in [true, false] {
         let mut data = return_gate_data();
-        let mut exterior = zone(180, 257, 20);
-        exterior.closed = closed;
-        data.zones.zones.insert(257, exterior);
+        data.zones.zones.get_mut(&TEST_ZONE).unwrap().closed = closed;
         let server = dungeon_server_with(data);
         crate::systems::npcs::install_hooks(&server);
         let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
@@ -4456,7 +4576,7 @@ async fn armory_exit_cleans_up_dungeon_membership_only_for_an_open_gate() {
             .leave_requests
             .push((a.p.character_id, i64::MAX));
 
-        cast_return_with_skill(&server, &a.p, indun::ARMORY_EXIT_SKILL, 320);
+        cast_return(&server, &a.p, RETURN_GATE_MAIN as i32);
         let frames = a.frames();
         if closed {
             assert_eq!(
@@ -4480,7 +4600,7 @@ async fn armory_exit_cleans_up_dungeon_membership_only_for_an_open_gate() {
         let yaw = std::f32::consts::FRAC_PI_2;
         assert!(frames.contains(&(
             sc::SCLoadInstancePacket,
-            load_instance(0, 257, 125.0, 210.0, 25.0, (0., 0., yaw))
+            load_instance(0, TEST_ZONE, 120.0, 210.0, 25.0, (0., 0., yaw))
         )));
         assert!(!frames
             .iter()
@@ -4488,7 +4608,7 @@ async fn armory_exit_cleans_up_dungeon_membership_only_for_an_open_gate() {
         let t = a.p.data().unit.transform;
         assert_eq!(
             (t.instance_id, t.zone_id, t.x, t.y, t.z, t.rot_z),
-            (0, 257, 125.0, 210.0, 25.0, yaw)
+            (0, TEST_ZONE, 120.0, 210.0, 25.0, yaw)
         );
         assert_eq!(a.p.data().main_world_position, Some(saved));
         assert!(inside.object(a.p.obj_id).is_none());

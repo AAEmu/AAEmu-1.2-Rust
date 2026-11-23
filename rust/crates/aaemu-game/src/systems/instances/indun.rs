@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::config::ServerProfile;
-use crate::data::world_data::Zone;
+use crate::data::world_data::{Portal, Zone};
 use crate::server::GameServer;
 use crate::systems::social::team::Team;
 use crate::world::{PlayerRef, WorldInstance};
@@ -931,13 +931,27 @@ pub fn request_leave_instance(server: &GameServer, p: &PlayerRef) -> bool {
     true
 }
 
+/// Leave a live dungeon or system channel through a Return gate in the main world.
+/// The Return effect resolves the gate's world and checks access before calling this.
+pub(crate) fn leave_at_gate(server: &GameServer, p: &PlayerRef, gate: &Portal) -> bool {
+    let instance = p.data().unit.transform.instance_id;
+    let Some(dungeon) = server.systems.instances.dungeon_of_world(instance) else {
+        return false;
+    };
+    if !dungeon
+        .world(server)
+        .is_some_and(|world| worlds::has_character(&world, p.character_id))
+    {
+        return false;
+    }
+    dungeon::on_dungeon_leave(server, &dungeon, p, Some(gate));
+    true
+}
+
 // Kept at its old path for the instance flow tests.
 #[cfg(test)]
 pub(crate) const ARMORY_EXIT_SKILL: u32 =
     crate::systems::instances::encounters::registry::ARMORY_EXIT_SKILL;
-pub(crate) use crate::systems::instances::encounters::armory::{
-    is_armory_exit, leave_armory_at_gate,
-};
 
 /// `DoIndunActions(startActionId, worldInstance)`: runs an action chain.
 pub fn do_indun_actions(server: &GameServer, start_action_id: u32, world: &Arc<WorldInstance>) {
