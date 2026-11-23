@@ -92,15 +92,6 @@ pub(super) fn plot_ground(skill_id: u32, event_id: u32) -> Option<PlotGround> {
     }
 }
 
-/// Hieronimus's (8962) wave spawners 46629..=46656 aim their adds at his aggro target.
-pub(super) fn is_wave_spawn(
-    caster_template: u32,
-    spawner_id: u32,
-    use_summoner_aggro_target: bool,
-) -> bool {
-    caster_template == 8962 && use_summoner_aggro_target && (46629..=46656).contains(&spawner_id)
-}
-
 // ---- hooks
 
 use crate::server::GameServer;

@@ -121,21 +121,6 @@ pub(super) fn summon_boss(sub_type: u32) -> Option<u32> {
     }
 }
 
-/// The spawners of Viboros (11265, 12762) and Calleil (11201, 12759) that aim their adds at
-/// the boss's aggro target.
-pub(super) fn is_wave_spawn(
-    caster_template: u32,
-    spawner_id: u32,
-    use_summoner_aggro_target: bool,
-) -> bool {
-    match caster_template {
-        11265 | 12762 => use_summoner_aggro_target,
-        11201 => matches!(spawner_id, 102334 | 102337 | 102340..=102342),
-        12759 => matches!(spawner_id, 110540..=110541 | 110544..=110545 | 110548),
-        _ => false,
-    }
-}
-
 /// Both Howling Abyss worlds keep their water per instance: Calleil's chamber level changes
 /// in one run only.
 pub(super) fn instance_scoped_water(world: &str) -> bool {
