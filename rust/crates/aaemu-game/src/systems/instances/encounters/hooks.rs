@@ -1,16 +1,9 @@
-//! The encounter hooks: the dungeon behaviour and geometry that the shared engine runs at its
-//! seams (AI ticks, leashes and chases, walker floors, doodad funcs, casts, knockbacks, buffs
-//! and water).
+//! Encounter behaviour and geometry at the shared engine seams.
 //!
-//! Each dungeon implements [`Encounter`] in its own file; every method has a no-op default, and
-//! a dungeon's `impl` only delegates to its free functions. The engine picks the dungeons with
-//! the key its old code tested:
-//! - [`for_zone`] for the AI hooks and the walker floor (the NPC's zone),
-//! - [`for_world`] for the character water hook (the world template's name),
-//! - [`all`] for the hooks keyed by an id that apply in every world (skills, doodads, gimmicks,
-//!   buffs), asked in the order Armory, Palace Cellar, Hadir Farm, Sharpwind Mines, Kroloal
-//!   Cradle, Howling Abyss. Their ids do not overlap, so at most one dungeon acts.
-
+//! Each encounter implements [`Encounter`] in its own file and delegates to its free
+//! functions. Every method has a no-op default. The engine dispatches with the original
+//! key. AI and walker floors use [`for_zone`], character water uses [`for_world`], and
+//! id-keyed behaviour uses [`all`]. The six dungeons precede the world content modules.
 use crate::models::buff::Buff;
 use crate::models::transform::PositionAndRotation;
 use crate::server::GameServer;
@@ -28,7 +21,7 @@ use crate::world::{PlayerRef, WorldInstance, WorldObject};
 
 use super::{armory, cradle, hadir, howling_abyss, palace_cellar, sharpwind};
 
-/// A dungeon's behaviour at the engine's seams. Every method is a no-op by default.
+/// Content behaviour at the engine's seams. Every method is a no-op by default.
 pub trait Encounter: Sync {
     /// Before a behaviour's tick: `true` when the encounter moved the NPC itself and the
     /// behaviour does not tick.
@@ -172,18 +165,19 @@ pub trait Encounter: Sync {
     }
 }
 
-/// Outside the dungeons: every hook is the default.
+/// For an unregistered zone or world, every hook is the default.
 struct NoEncounter;
 
 impl Encounter for NoEncounter {}
 
-static ALL: [&dyn Encounter; 6] = [
+static ALL: [&dyn Encounter; 7] = [
     &armory::Armory,
     &palace_cellar::PalaceCellar,
     &hadir::HadirFarm,
     &sharpwind::SharpwindMines,
     &cradle::KroloalCradle,
     &howling_abyss::HowlingAbyss,
+    &super::plateau::Plateau,
 ];
 
 /// The encounter of a zone.
@@ -212,8 +206,7 @@ pub fn for_world(name: &str) -> &'static dyn Encounter {
     }
 }
 
-/// Every dungeon's encounter, for the hooks keyed by an id: Armory, Palace Cellar, Hadir Farm,
-/// Sharpwind Mines, Kroloal Cradle, Howling Abyss.
+/// Every encounter, for hooks keyed by an id.
 pub fn all() -> &'static [&'static dyn Encounter] {
     &ALL
 }

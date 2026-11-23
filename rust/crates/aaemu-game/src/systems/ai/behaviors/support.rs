@@ -93,16 +93,16 @@ pub(super) fn template_scalars(c: &AiCtx<'_>) -> TemplateScalars {
 
 /// The `NpcTemplate` values the behaviors read.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct TemplateScalars {
+pub(crate) struct TemplateScalars {
     pub(super) aggression: bool,
     pub(super) attack_start_range_scale: f32,
     pub(super) sight_range_scale: f32,
     pub(super) sight_fov_scale: f32,
-    pub(super) base_skill_id: i32,
+    pub(crate) base_skill_id: i32,
     pub(super) base_skill_delay: f32,
     pub(super) base_skill_strafe: bool,
     pub(super) use_range_mod: bool,
-    pub(super) skills_count: usize,
+    pub(crate) skills_count: usize,
     pub(super) return_distance: f32,
     pub(super) absolute_return_distance: f32,
     npc_ai_param_id: i32,

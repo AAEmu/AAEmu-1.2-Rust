@@ -1,7 +1,7 @@
-//! The encounter registry: the one place engine code asks about dungeon-specific ids.
+//! The encounter registry: the one place engine code asks about encounter-specific ids.
 //!
-//! Each function delegates to the tables of the dungeons it concerns. A lookup that more than
-//! one dungeon answers asks them in the order of the id list it replaced; the lists do not
+//! Each function delegates to the tables of the encounters it concerns. A lookup that more than
+//! one encounter answers asks them in the order of the id list it replaced; the lists do not
 //! overlap, so the order never changes a result. Arguments that cost a lock are passed as
 //! closures and are only called where the replaced code read them.
 
@@ -361,4 +361,14 @@ pub fn water_cells(template_name: &str) -> WaterCells {
 /// closed mesh for the open animation (Palace Cellar).
 pub fn door_reuses_closed_mesh(template_id: u32, func_group: u32) -> bool {
     palace_cellar::door_reuses_closed_mesh(template_id, func_group)
+}
+
+// ---- World content
+
+/// Adjust the computed chase range for the melee stats used by Plateau Earth Elemental.
+pub(crate) fn melee_chase_range(
+    t: &crate::systems::ai::behaviors::TemplateScalars,
+    range: f32,
+) -> f32 {
+    super::plateau::melee_chase_range(t, range)
 }
