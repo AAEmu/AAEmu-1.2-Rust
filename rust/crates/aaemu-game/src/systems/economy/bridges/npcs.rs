@@ -516,6 +516,22 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         )
     }
 
+    fn try_bag_consume_item(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        task: u8,
+        template_id: u32,
+        count: i32,
+    ) -> bool {
+        let mut txn = ItemTxn::begin(server);
+        let bag = Inv::of(player).bag();
+        let mut bag = lock(&bag);
+        count > 0
+            && bag.items_by_template_unlocked(template_id, -1).1 >= count
+            && bag.consume_item(task, template_id, count, None, &mut txn.env) == count
+    }
+
     fn bag_consume_item(
         &self,
         server: &GameServer,

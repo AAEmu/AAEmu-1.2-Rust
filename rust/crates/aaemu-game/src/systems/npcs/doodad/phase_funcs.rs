@@ -43,23 +43,56 @@ fn override_if_character(
     false
 }
 
-/// The `OverridePhaseTime` handling of `Timer` / `Growth`: returns the remaining delay.
-fn time_left_with_override(ctx: &DoodadCtx<'_>, delay: f64) -> f64 {
+fn effective_growth_delay(ctx: &DoodadCtx<'_>, delay: i32) -> f64 {
+    let delay = f64::from(delay) / ctx.server.systems.npcs.doodads.growth_rate();
+    if doodad_has_matching_climate(ctx) {
+        delay * f64::from(0.73f32)
+    } else {
+        delay
+    }
+}
+
+/// r208022 RVAs 0x3b4810 and 0x3b2930 read the scale endpoints locally and animate
+/// over the supplied delay. Compact groups may author a separate timer or Final.
+pub(super) fn refresh_growth_scale_deadline(ctx: &DoodadCtx<'_>) {
+    let (group, phase_time) = {
+        let d = ctx.doodad.data();
+        (
+            d.func_group_id,
+            if d.phase.override_phase_time_ms > 0 {
+                d.phase.override_phase_time_ms
+            } else {
+                d.phase_time_ms
+            },
+        )
+    };
+    let data = ctx.data();
+    let growth = data.phase_funcs(group).iter().find_map(|phase| {
+        match data.phase_func_template(phase.func_id, &phase.func_type) {
+            Some(FuncTemplate::Growth(f)) if f.start_scale != f.end_scale => Some(f),
+            _ => None,
+        }
+    });
+    let deadline =
+        growth.map(|f| phase_time.saturating_add(effective_growth_delay(ctx, f.delay) as i64));
+    ctx.doodad.data().phase.growth_scale_end_ms = deadline;
+}
+
+/// The persisted phase start plus the effective delay is the deadline. The runtime task
+/// waits at least one millisecond even when that deadline elapsed offline.
+fn phase_deadline(ctx: &DoodadCtx<'_>, delay: f64) -> (i64, f64) {
+    let now = now_ms();
     let mut d = ctx.doodad.data();
-    let mut time_left = delay;
+    let mut start = now;
     if d.phase.override_phase_time_ms > 0 {
-        // Reset the override
-        d.phase_time_ms = d.phase.override_phase_time_ms;
-        d.phase.override_phase_time_ms = 0;
+        start = std::mem::take(&mut d.phase.override_phase_time_ms);
+        d.phase_time_ms = start;
         d.update_final_phase_end();
-        let since_phase_start = (now_ms() - d.phase_time_ms) as f64;
-        time_left = delay - since_phase_start;
     }
-    if time_left < 1.0 {
-        time_left = 1.0;
-    }
-    d.growth_time_ms = now_ms() + time_left as i64;
-    time_left
+    let due = start.saturating_add(delay as i64);
+    let time_left = due.saturating_sub(now).max(1);
+    d.growth_time_ms = now.saturating_add(time_left);
+    (due, time_left as f64)
 }
 
 /// `DoodadPhaseFunc.Use(caster, owner)` → the template's `Use`. Returns `true` to stop the phase
@@ -73,7 +106,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                     "DoodadFuncTimer: Delay {}, NextPhase {}, KeepRequester {}, ShowTip {}, ShowEndTime {}, Tip {}",
                     f.delay, f.next_phase, f.keep_requester, f.show_tip, f.show_end_time, f.tip
                 );
-                let time_left = time_left_with_override(ctx, f64::from(f.delay));
+                let (_, time_left) = phase_deadline(ctx, f64::from(f.delay));
                 tasks::start_func_task(
                     server,
                     &ctx.doodad,
@@ -155,13 +188,9 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             true
         }
         FuncTemplate::Growth(f) => {
-            // C# `owner.Scale = StartScale / 1000f` writes BaseUnit.Scale, which the get-only
-            // Doodad.Scale override never reads: no visible effect (mirrored).
-            let mut custom_delay = f64::from(f.delay) / server.systems.npcs.doodads.growth_rate(); // decrease delay
-            if doodad_has_matching_climate(ctx) {
-                custom_delay *= f64::from(0.73f32);
-            }
-            let time_left = time_left_with_override(ctx, custom_delay);
+            // The r208022 client reads both scale endpoints from its 1.2 growth descriptor
+            // and animates them using the wire delay (RVAs 0x3b4810 and 0x3b2930).
+            let (due_ms, time_left) = phase_deadline(ctx, effective_growth_delay(ctx, f.delay));
             tracing::trace!(
                 "DoodadFuncGrowth: Delay {}, StartScale {}, EndScale {}, NextPhase {}",
                 f.delay,
@@ -175,7 +204,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                 caster,
                 FuncTaskKind::Growth {
                     next_phase: f.next_phase,
-                    end_scale: f.end_scale as f32 / 1000.0,
+                    due_ms,
                 },
                 tasks::ms(time_left),
             );
@@ -526,6 +555,7 @@ fn use_respawn(ctx: &DoodadCtx<'_>, player: &crate::world::PlayerRef) {
         related_ids: None,
         family_id: 0,
         respawn_doodad_template_id: 0,
+        initial_func_group_id: 0,
     };
     let spawner = Arc::new(DoodadSpawner::new(def, Some(ctx.world.id)));
     spawner.spawn(server, 0);

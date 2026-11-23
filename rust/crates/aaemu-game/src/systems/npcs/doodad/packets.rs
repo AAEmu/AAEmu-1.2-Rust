@@ -67,7 +67,7 @@ impl SCDoodadPhaseChangedPacket {
         Self {
             obj_id,
             func_group_id: d.func_group_id,
-            time_left: d.time_left(now_ms),
+            time_left: d.phase_wire_time_left(now_ms),
             item_template_id: d.item_template_id,
         }
     }
