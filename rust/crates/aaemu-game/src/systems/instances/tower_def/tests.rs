@@ -917,7 +917,7 @@ async fn tower_def_schedule_handles_midnight_intervals_and_the_disable_switch() 
 
 #[tokio::test]
 async fn tower_def_clock_sets_and_forward_jumps_skip_crossings() {
-    let mut server = fixture();
+    let server = fixture();
     server.config.update(|c| {
         c.dungeons.tower_defense.enabled = true;
         c.dungeons.tower_defense.events = vec![TowerDefenseEventConfig {
