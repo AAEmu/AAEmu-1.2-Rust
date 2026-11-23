@@ -544,6 +544,17 @@ async fn real_compact_db_damage_engage_combat_gates_battle_but_keeps_threat() {
     };
     assert_eq!(effect.id, 699);
     assert!(!effect.engage_combat);
+    check_damage_engage_combat(&mut effect);
+}
+
+#[tokio::test]
+async fn damage_pipeline_engage_combat_flag_keeps_threat_without_battle() {
+    let mut effect = skills::tests::damage_effect(1, 100);
+    effect.engage_combat = false;
+    check_damage_engage_combat(&mut effect);
+}
+
+fn check_damage_engage_combat(effect: &mut DamageEffect) {
     let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
     // Model an idle NPC whose damage notification transitions it into combat immediately.
     struct StartsCombat;
@@ -572,7 +583,7 @@ async fn real_compact_db_damage_engage_combat_gates_battle_but_keeps_threat() {
     let args = args((&player).into(), (&npc).into(), 1);
     client.drain();
 
-    damage(&server, &effect, &args, None);
+    damage(&server, effect, &args, None);
 
     let dealt = {
         let n = npc.data();
@@ -599,19 +610,19 @@ async fn real_compact_db_damage_engage_combat_gates_battle_but_keeps_threat() {
 
     // The next engaging hit still announces combat for the existing threat entry.
     effect.engage_combat = true;
-    damage(&server, &effect, &args, None);
+    damage(&server, effect, &args, None);
     assert!(player.data().unit.is_in_battle);
     assert!(npc.data().unit.is_in_battle);
     assert!(npc.data().unit.skill_state.aggro_table[&player.obj_id].damage_aggro > dealt);
     assert!(client.drain_ops().contains(&sc::SCCombatFirstHitPacket));
-    damage(&server, &effect, &args, None);
+    damage(&server, effect, &args, None);
     assert!(!client.drain_ops().contains(&sc::SCCombatFirstHitPacket));
 
     // A disabled hit keeps the existing battle state and does not refresh either timer.
     player.data().unit.last_combat_activity_ms = 1;
     npc.data().unit.last_combat_activity_ms = 1;
     effect.engage_combat = false;
-    damage(&server, &effect, &args, None);
+    damage(&server, effect, &args, None);
     for obj in [WorldObject::from(&player), WorldObject::from(&npc)] {
         obj.with_unit(|u| {
             assert!(u.unit().is_in_battle);
@@ -728,10 +739,6 @@ async fn damage_pipeline_npc_percent_attacks_select_pre_hit_player_hp() {
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
 async fn real_compact_db_damage_fire_proc_gates_both_item_proc_families() {
-    use crate::data::items::ItemProcTemplate;
-    use crate::systems::economy::procs::chance_kind;
-    use skills::data::{BuffTemplate, EffectKind, EffectTemplate, SkillTemplate};
-
     // Skill 22151 deals damage through global effect 30696 (descriptor 4818).
     let Some(mut effect) = compact_damage(30696) else {
         return;
@@ -739,6 +746,20 @@ async fn real_compact_db_damage_fire_proc_gates_both_item_proc_families() {
     assert_eq!(effect.id, 4818);
     assert!(!effect.fire_proc);
     assert!(effect.engage_combat);
+    check_damage_fire_proc(&mut effect);
+}
+
+#[tokio::test]
+async fn damage_pipeline_fire_proc_flag_gates_both_item_proc_families() {
+    let mut effect = skills::tests::damage_effect(1, 100);
+    effect.fire_proc = false;
+    check_damage_fire_proc(&mut effect);
+}
+
+fn check_damage_fire_proc(effect: &mut DamageEffect) {
+    use crate::data::items::ItemProcTemplate;
+    use crate::systems::economy::procs::chance_kind;
+    use skills::data::{BuffTemplate, EffectKind, EffectTemplate, SkillTemplate};
 
     const PROC_BUFF: u32 = 700;
     const PROC_SKILL: u32 = 800;
@@ -800,14 +821,14 @@ async fn real_compact_db_damage_fire_proc_gates_both_item_proc_families() {
     }
     let args = args((&attacker).into(), (&victim).into(), 1);
 
-    damage(&server, &effect, &args, None);
+    damage(&server, effect, &args, None);
     assert!(victim.data().unit.hp < 100_000);
     assert!(attacker.data().unit.is_in_battle);
     assert!(!attacker.data().unit.buffs.check_buff(PROC_BUFF));
     assert!(!victim.data().unit.buffs.check_buff(PROC_BUFF));
 
     effect.fire_proc = true;
-    damage(&server, &effect, &args, None);
+    damage(&server, effect, &args, None);
     assert!(attacker.data().unit.buffs.check_buff(PROC_BUFF));
     assert!(victim.data().unit.buffs.check_buff(PROC_BUFF));
 }
