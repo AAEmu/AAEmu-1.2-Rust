@@ -438,10 +438,14 @@ struct Inner {
     index: HashMap<(i32, i32), Vec<u32>>,
     ingested_cells: HashSet<(i32, i32)>,
     calleil_level: Option<(u32, LevelChange)>,
+    phase_levels: HashMap<u32, LevelChange>,
 }
 
 impl Inner {
     fn surface_offset(&self, area: u32) -> f32 {
+        if let Some(change) = self.phase_levels.get(&area) {
+            return change.offset();
+        }
         self.calleil_level
             .as_ref()
             .filter(|(id, _)| *id == area)
@@ -519,11 +523,52 @@ impl WaterBodies {
         inner.index.clear();
         inner.ingested_cells.clear();
         inner.calleil_level = None;
+        inner.phase_levels.clear();
     }
 
     /// Adds an area (tests / tools; `Areas.Add` + `RebuildSpatialIndex`).
     pub fn add(&self, area: WaterBodyArea) {
         Self::add_area(&mut self.lock(), area);
+    }
+
+    /// Inferred from the signed 1.2 WaterVolume rows and the paired positive/negative changes.
+    /// Apply the delta to the nearest authored surface covering the doodad's position.
+    pub(crate) fn shift_phase_surface(&self, anchor: Vec3, delta: f32, duration: f32) {
+        if delta == 0.0 || !delta.is_finite() || !duration.is_finite() {
+            return;
+        }
+        let mut inner = self.lock();
+        let cell = (
+            (anchor.x / SPATIAL_CELL_SIZE).floor() as i32,
+            (anchor.y / SPATIAL_CELL_SIZE).floor() as i32,
+        );
+        let Some(ids) = inner.index.get(&cell) else {
+            return;
+        };
+        let Some((id, from, _)) = ids
+            .iter()
+            .filter_map(|&id| {
+                let area = &inner.areas[id as usize];
+                if !area.bounding_box.contains(anchor.x, anchor.y) {
+                    return None;
+                }
+                let (surface, _) = area.get_surface(anchor)?;
+                let from = inner.surface_offset(id);
+                Some((id, from, (surface.z + from - anchor.z).abs()))
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+        else {
+            return;
+        };
+        inner.phase_levels.insert(
+            id,
+            LevelChange {
+                from,
+                to: from + delta,
+                duration,
+                start: Instant::now(),
+            },
+        );
     }
 
     /// Raise or lower the chamber's server-side surface over the authored phase duration.

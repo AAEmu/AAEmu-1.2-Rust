@@ -1282,6 +1282,7 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
             let is_sticky = u
                 .actor_flags
                 .contains(MoveTypeActorFlags::HANGING_FROM_OBJECT);
+            target.core().set_climbing(is_sticky);
             if target.core().sticky_parent() != 0
                 && !is_sticky
                 && !crate::systems::vehicles::movement::is_boarded_on_transfer(&world, &target)

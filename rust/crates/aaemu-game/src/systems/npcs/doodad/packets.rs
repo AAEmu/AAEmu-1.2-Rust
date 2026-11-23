@@ -53,12 +53,37 @@ pub fn error_msg(error: i16) -> SCErrorMsgPacket {
 // S->C
 // ---------------------------------------------------------------------------------------------
 
+/// r208022 scene codec at 0x7c4ef0 and client handler at 0x1ea650.
+#[derive(Debug, Clone)]
+pub struct SCDoodadPuzzleScenePacket {
+    pub obj_id: u32,
+    pub projectile_id: u32,
+    pub projectile_delay: u32,
+    pub anim: String,
+}
+packet_def!(
+    SCDoodadPuzzleScenePacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCDoodadPuzzleScenePacket
+);
+impl Marshal for SCDoodadPuzzleScenePacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.obj_id)
+            .write_u32(self.projectile_id)
+            .write_u32(self.projectile_delay)
+            .write_str(&self.anim)
+            .write_u32(0);
+    }
+}
+
 /// `SCDoodadPhaseChangedPacket(doodad)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCDoodadPhaseChangedPacket {
     pub obj_id: u32,
     pub func_group_id: u32,
     pub time_left: u32,
+    /// Model selector read by the r208022 phase codec at 0x7c4e40.
+    pub puzzle_group: i32,
     pub item_template_id: u32,
 }
 impl SCDoodadPhaseChangedPacket {
@@ -68,6 +93,7 @@ impl SCDoodadPhaseChangedPacket {
             obj_id,
             func_group_id: d.func_group_id,
             time_left: d.phase_wire_time_left(now_ms),
+            puzzle_group: d.puzzle_group,
             item_template_id: d.item_template_id,
         }
     }
@@ -82,7 +108,7 @@ impl Marshal for SCDoodadPhaseChangedPacket {
         s.write_bc(self.obj_id)
             .write_u32(self.func_group_id)
             .write_u32(self.time_left) // growing
-            .write_i32(-1) // puzzleGroup
+            .write_i32(self.puzzle_group)
             .write_u32(self.item_template_id);
     }
 }
@@ -673,6 +699,29 @@ mod tests {
         e.extend((-1i32).to_le_bytes());
         e.extend(27606u32.to_le_bytes());
         assert_eq!(body(&p), e);
+    }
+
+    #[test]
+    fn audit_puzzle_scene_encodes_one_authored_scene() {
+        let packet = SCDoodadPuzzleScenePacket {
+            obj_id: 0x01_0203,
+            projectile_id: 336,
+            projectile_delay: 2000,
+            anim: "j".into(),
+        };
+        assert_eq!(packet.opcode(), sc::SCDoodadPuzzleScenePacket);
+        assert_eq!(
+            body(&packet),
+            [3, 2, 1, 0x50, 1, 0, 0, 0xd0, 7, 0, 0, 1, 0, b'j', 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn audit_phase_changed_writes_selected_puzzle_group() {
+        let mut doodad = Doodad::new(2336);
+        doodad.puzzle_group = 3;
+        let packet = SCDoodadPhaseChangedPacket::new(0x01_0203, &doodad, 1_000);
+        assert_eq!(&body(&packet)[11..15], &3i32.to_le_bytes());
     }
 
     #[test]

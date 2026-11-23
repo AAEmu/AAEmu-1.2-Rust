@@ -26,7 +26,17 @@ use crate::world::{now_ms, DoodadRef, WorldInstance, WorldObject};
 #[derive(Debug, Clone)]
 pub enum FuncTaskKind {
     /// `DoodadFuncTimerTask(caster, owner, 0, nextPhase)`.
-    Timer { next_phase: i32 },
+    Timer {
+        next_phase: i32,
+        /// Inferred from 1.2 timer rows such as 5461. This controls the next phase requester.
+        keep_requester: bool,
+    },
+    /// Complete the single outcome selected from the 1.2 puzzle-out rows.
+    PuzzleOutcome {
+        token: u64,
+        next_phase: i32,
+        loot_pack_id: u32,
+    },
     /// Completes a growth phase and passes its scheduled deadline to the successor.
     Growth { next_phase: i32, due_ms: i64 },
     /// `DoodadFuncCloutTask(caster, owner, 0, nextPhase, areaTrigger)`.
@@ -283,6 +293,33 @@ pub fn start_func_task_for(
     generation
 }
 
+/// Groups 14817 and 14856 pair puzzle outcomes with a clout that expires independently.
+/// Each new outcome or phase invalidates the pending result for that doodad.
+pub(super) fn start_puzzle_outcome(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    outcome: &super::templates::DoodadFuncPuzzleOut,
+) {
+    let token = next_generation();
+    ctx.doodad.data().phase.puzzle_task = token;
+    schedule(
+        ctx.server,
+        DoodadTask {
+            world: Some(Arc::downgrade(&ctx.world)),
+            doodad: ctx.doodad.clone(),
+            holder: ctx.doodad.clone(),
+            caster: caster.cloned(),
+            generation: 0,
+            kind: FuncTaskKind::PuzzleOutcome {
+                token,
+                next_phase: outcome.next_phase,
+                loot_pack_id: outcome.loot_pack_id,
+            },
+        },
+        ms(f64::from(outcome.delay)),
+    );
+}
+
 /// `doodad.FuncTask.Cancel(); Task.Run(doodad.FuncTask.ExecuteAsync)` (`/tickdoodad`): runs the
 /// doodad's pending func task now (on the task runtime, as `Task.Run`) and cancels the scheduled
 /// run. `false` when the doodad has no `FuncTask`.
@@ -444,14 +481,45 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
     if task.generation != 0 && task.holder.data().phase.func_task != task.generation {
         return; // cancelled
     }
-    let ctx = DoodadCtx::new(server, world, task.doodad.clone());
+    let mut ctx = DoodadCtx::new(server, world, task.doodad.clone());
     let caster = task.caster.as_ref();
     let (template_id, func_group_id) = {
         let d = ctx.doodad.data();
         (d.template_id, d.func_group_id)
     };
     match task.kind {
-        FuncTaskKind::Timer { next_phase } => {
+        FuncTaskKind::PuzzleOutcome {
+            token,
+            next_phase,
+            loot_pack_id,
+        } => {
+            {
+                let mut doodad = ctx.doodad.data();
+                if doodad.phase.puzzle_task != token {
+                    return;
+                }
+                doodad.phase.puzzle_task = 0;
+            }
+            if let Some(player) = DoodadCtx::as_player(caster).filter(|_| loot_pack_id != 0) {
+                super::funcs::economy(server).give_loot_pack(server, player, loot_pack_id);
+            }
+            if next_phase > 0 {
+                phase::do_change_phase(&ctx, caster, next_phase);
+            }
+        }
+        FuncTaskKind::Timer {
+            next_phase,
+            keep_requester,
+        } => {
+            let caster = caster.filter(|object| {
+                object.as_player().is_none_or(|requester| {
+                    ctx.world.object(object.obj_id()).is_some_and(|current| {
+                        current
+                            .as_player()
+                            .is_some_and(|p| Arc::ptr_eq(p, requester))
+                    })
+                })
+            });
             tracing::trace!(
                 "[Doodad] DoodadFuncTimerTask: Doodad {}, TemplateId {template_id}. Using skill 0 with doodad phase {next_phase}",
                 ctx.doodad.obj_id
@@ -465,6 +533,9 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
                     return;
                 }
             }
+            // Compact Sal Temple timers 4565–4567 clear keep_requester, but their
+            // phases still emit pulses. Keep the effect actor through the timer chain.
+            ctx.carries_phase_requester = keep_requester;
             phase::do_change_phase(&ctx, caster, next_phase);
             // The phase state does not allow us to interact with the object, so we will
             // automatically get items from ID=6121 & ID=6125, "Treasure Chest" in Palace
@@ -503,7 +574,11 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
                 super::manager::delete(server, &ctx.world, &ctx.doodad);
             }
             area_trigger::remove_area_trigger(server, &trigger);
-            phase::do_change_phase(&ctx, caster, next_phase);
+            let waits_for_puzzle =
+                next_phase == func_group_id as i32 && ctx.doodad.data().phase.puzzle_task != 0;
+            if !waits_for_puzzle {
+                phase::do_change_phase(&ctx, caster, next_phase);
+            }
         }
         FuncTaskKind::Final {
             respawn,

@@ -1386,6 +1386,191 @@ async fn use_then_timer_returns_to_start_phase() {
 }
 
 #[tokio::test]
+async fn audit_timer_only_passes_requester_when_authored() {
+    for keep_requester in [true, false] {
+        let b = Builder::default()
+            .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2), (13, 2)])
+            .fake_use(10, 1, 11)
+            .phase_func(
+                11,
+                FuncTemplate::Timer(DoodadFuncTimer {
+                    id: 5,
+                    delay: 500,
+                    next_phase: 12,
+                    keep_requester,
+                    ..DoodadFuncTimer::default()
+                }),
+            )
+            .phase_func(
+                12,
+                FuncTemplate::CraftDirect(DoodadFuncCraftDirect {
+                    id: 6,
+                    next_phase: 13,
+                }),
+            );
+        let mut f = fx(b);
+        let d = f.doodad(TEMPLATE);
+        f.use_(&d);
+        assert_eq!(group(&d), 11);
+        assert_eq!(f.advance(500), 1);
+        assert_eq!(group(&d), if keep_requester { 13 } else { 12 });
+    }
+}
+
+#[tokio::test]
+async fn audit_negative_use_override_takes_priority_over_row_destination() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .fake_use(10, 1, 11);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d.clone());
+    d.data().phase.override_phase = -1;
+    let func = ctx.data().funcs_for_group(10).first().unwrap();
+    assert!(do_func(&ctx, Some(&f.caster()), 0, Some(func)));
+    assert_eq!(d.data().phase.override_phase, 0);
+    assert!(d.data().phase.deleted);
+}
+
+#[tokio::test]
+async fn audit_puzzle_input_sets_model_and_outcome_waits_for_authored_delay() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2)])
+        .fake_use(10, 1, 11)
+        .phase_func(
+            10,
+            FuncTemplate::PuzzleIn(DoodadFuncPuzzleIn {
+                id: 1,
+                group_id: 3,
+                ratio: 100.0,
+            }),
+        )
+        .phase_func(
+            11,
+            FuncTemplate::PuzzleOut(DoodadFuncPuzzleOut {
+                id: 1,
+                group_id: 5,
+                ratio: 100.0,
+                next_phase: 10,
+                delay: 6400,
+                ..DoodadFuncPuzzleOut::default()
+            }),
+        )
+        .phase_func(
+            11,
+            FuncTemplate::PuzzleOut(DoodadFuncPuzzleOut {
+                id: 2,
+                group_id: 3,
+                ratio: 100.0,
+                next_phase: 12,
+                delay: 6400,
+                anim: "j".into(),
+                ..DoodadFuncPuzzleOut::default()
+            }),
+        )
+        .phase_func(11, clout_to(0, 3, 1000, 11));
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    assert_eq!(d.data().puzzle_group, 3);
+    f.use_(&d);
+    assert_eq!(group(&d), 11);
+    assert!(f
+        .client
+        .drain_ops()
+        .contains(&sc::SCDoodadPuzzleScenePacket));
+    assert_eq!(f.advance(1000), 1);
+    assert_eq!(group(&d), 11);
+    assert_eq!(f.advance(5399), 0);
+    assert_eq!(f.advance(1), 1);
+    assert_eq!(group(&d), 12);
+}
+
+#[tokio::test]
+async fn audit_puzzle_roll_requires_its_item() {
+    let mut b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .func(10, "DoodadFuncPuzzleRoll", 11, FAKE_SKILL);
+    b.data
+        .func_templates
+        .entry("DoodadFuncPuzzleRoll")
+        .or_default()
+        .insert(
+            1,
+            FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll {
+                id: 1,
+                item_id: 25116,
+                count: 1,
+            }),
+        );
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.use_(&d);
+    assert_eq!(group(&d), 10);
+}
+
+#[tokio::test]
+async fn audit_navi_removal_only_fires_in_its_phase() {
+    let build = || {
+        Builder::default()
+            .template(TEMPLATE, &[(10, 1), (11, 2)])
+            .phase_func(
+                10,
+                FuncTemplate::NaviRemoveTimer(DoodadFuncNaviRemoveTimer {
+                    id: 1,
+                    after: 600_000,
+                }),
+            )
+    };
+    let mut f = fx(build());
+    let doodad = f.doodad(TEMPLATE);
+    assert_eq!(f.advance(599_999), 0);
+    assert!(!doodad.data().phase.deleted);
+    assert_eq!(f.advance(1), 1);
+    assert!(doodad.data().phase.deleted);
+
+    let mut f = fx(build());
+    let doodad = f.doodad(TEMPLATE);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), doodad.clone());
+    do_change_phase(&ctx, None, 11);
+    f.advance(600_000);
+    assert!(!doodad.data().phase.deleted);
+}
+
+#[tokio::test]
+async fn audit_water_phase_shifts_the_local_volume() {
+    use crate::systems::ai::physics::water::{WaterBodyArea, WaterBodyAreaType};
+    use crate::systems::skills::controllers::Vec3;
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_func(
+            11,
+            FuncTemplate::WaterVolume(DoodadFuncWaterVolume {
+                id: 1,
+                level_change: -5.0,
+                duration: 0.0,
+            }),
+        );
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    let water = crate::systems::ai::physics::world_water(&f.server, &f.world);
+    let mut area = WaterBodyArea::new("test", WaterBodyAreaType::Polygon);
+    area.depth = 30.0;
+    area.points = vec![
+        Vec3::new(110.0, 120.0, 110.0),
+        Vec3::new(130.0, 120.0, 110.0),
+        Vec3::new(130.0, 140.0, 110.0),
+        Vec3::new(110.0, 140.0, 110.0),
+    ];
+    area.update_bounds();
+    water.add(area);
+    let probe = Vec3::new(120.0, 130.0, 112.0);
+    assert_eq!(water.get_water_surface(probe).0, 110.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d);
+    do_change_phase(&ctx, None, 11);
+    assert_eq!(water.get_water_surface(probe).0, 105.0);
+}
+
+#[tokio::test]
 async fn phase_change_cancels_pending_timer() {
     let b = Builder::default()
         .template(TEMPLATE, &[(10, 1), (11, 2)])

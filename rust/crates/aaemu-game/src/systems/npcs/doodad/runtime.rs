@@ -14,6 +14,7 @@ pub struct DoodadCtx<'a> {
     pub server: &'a GameServer,
     pub world: Arc<WorldInstance>,
     pub doodad: DoodadRef,
+    pub(super) carries_phase_requester: bool,
 }
 
 impl<'a> DoodadCtx<'a> {
@@ -22,6 +23,7 @@ impl<'a> DoodadCtx<'a> {
             server,
             world,
             doodad,
+            carries_phase_requester: true,
         }
     }
 
@@ -50,5 +52,13 @@ impl<'a> DoodadCtx<'a> {
     /// `caster as Character`.
     pub fn as_player(caster: Option<&WorldObject>) -> Option<&PlayerRef> {
         caster.and_then(WorldObject::as_player)
+    }
+
+    /// The character asking for the phase, if the 1.2 timer retained that requester.
+    pub(super) fn phase_requester<'b>(
+        &self,
+        caster: Option<&'b WorldObject>,
+    ) -> Option<&'b PlayerRef> {
+        Self::as_player(caster).filter(|_| self.carries_phase_requester)
     }
 }

@@ -112,6 +112,7 @@ fn set_func_group_id_at(server: &GameServer, doodad: &DoodadRef, value: u32, pha
         d.phase.interaction_counts.clear();
         d.phase.pending_loot = None;
         d.phase.pending_loot_from_bag = false;
+        d.phase.puzzle_task = 0;
         d.phase_time_ms = phase_time_ms;
         let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
@@ -810,7 +811,15 @@ pub fn do_func(
             return true;
         }
     }
-    if func.next_phase == -1 {
+    // ConditionalUse descriptor 25 in the 1.2 compact authors -1 for its item branch.
+    // Resolve that inferred directive through the existing use-transition rules.
+    let next_phase = if override_phase != 0 {
+        ctx.doodad.data().phase.override_phase = 0;
+        override_phase
+    } else {
+        func.next_phase
+    };
+    if next_phase == -1 {
         // We stay in the current phase; the check is needed for Windstone id=1473
         if !has_only_group_kind_start(ctx) {
             if tasks::cancel_func_task(&ctx.doodad) {
@@ -820,13 +829,7 @@ pub fn do_func(
         }
         return true;
     }
-    if override_phase > 0 {
-        // occurs in DoodadFuncConditionalUse
-        set_func_group_id(ctx.server, &ctx.doodad, override_phase as u32);
-        ctx.doodad.data().phase.override_phase = 0;
-    } else {
-        set_func_group_id(ctx.server, &ctx.doodad, func.next_phase as u32);
-    }
+    set_func_group_id(ctx.server, &ctx.doodad, next_phase as u32);
     false
 }
 
@@ -983,7 +986,14 @@ fn do_phase_funcs(
     let (triggers, others): (Vec<_>, Vec<_>) = phase_funcs
         .iter()
         .partition(|pf| pf.func_type == "DoodadFuncPulseTrigger");
+    let puzzle_in = phase_funcs::select_puzzle_input(ctx, phase_funcs);
+    let puzzle_out = phase_funcs::select_puzzle_outcome(ctx, phase_funcs);
     for pf in others.into_iter().chain(triggers) {
+        match pf.func_type.as_str() {
+            "DoodadFuncPuzzleIn" if puzzle_in != Some(pf.func_id) => continue,
+            "DoodadFuncPuzzleOut" if puzzle_out != Some(pf.func_id) => continue,
+            _ => {}
+        }
         if deferred_ratio && pf.func_type == "DoodadFuncRatioChange" {
             continue;
         }

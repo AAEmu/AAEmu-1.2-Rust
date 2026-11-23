@@ -222,7 +222,6 @@ async fn to_next_phase_funcs_and_stubs() {
         FuncTemplate::Cutdowning(DoodadFuncCutdowning { id: 1 }),
         FuncTemplate::Harvest(DoodadFuncHarvest { id: 1 }),
         FuncTemplate::OpenFarmInfo(DoodadFuncOpenFarmInfo { id: 1, farm_id: 0 }),
-        FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll::default()),
     ] {
         fx.doodad.data().phase.to_next_phase = false;
         fx.run(t, 0, 0);
@@ -236,6 +235,12 @@ async fn to_next_phase_funcs_and_stubs() {
         FuncTemplate::StoreUi(DoodadFuncStoreUi::default()),
         FuncTemplate::EvidenceItemLoot(DoodadFuncEvidenceItemLoot::default()),
         FuncTemplate::TreeByProductsCollect(DoodadFuncTreeByProductsCollect::default()),
+        // Compact PuzzleRoll 2 requires one item 25116 before it can advance.
+        FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll {
+            id: 2,
+            item_id: 25116,
+            count: 1,
+        }),
         // phase funcs are not `DoodadFuncTemplate`s
         FuncTemplate::Timer(DoodadFuncTimer::default()),
     ] {
