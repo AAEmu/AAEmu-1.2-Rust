@@ -1385,6 +1385,82 @@ async fn use_then_timer_returns_to_start_phase() {
 }
 
 #[tokio::test]
+async fn audit_puzzle_input_sets_model_and_outcome_waits_for_authored_delay() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2)])
+        .fake_use(10, 1, 11)
+        .phase_func(
+            10,
+            FuncTemplate::PuzzleIn(DoodadFuncPuzzleIn {
+                id: 1,
+                group_id: 3,
+                ratio: 100.0,
+            }),
+        )
+        .phase_func(
+            11,
+            FuncTemplate::PuzzleOut(DoodadFuncPuzzleOut {
+                id: 1,
+                group_id: 5,
+                ratio: 100.0,
+                next_phase: 10,
+                delay: 6400,
+                ..DoodadFuncPuzzleOut::default()
+            }),
+        )
+        .phase_func(
+            11,
+            FuncTemplate::PuzzleOut(DoodadFuncPuzzleOut {
+                id: 2,
+                group_id: 3,
+                ratio: 100.0,
+                next_phase: 12,
+                delay: 6400,
+                anim: "j".into(),
+                ..DoodadFuncPuzzleOut::default()
+            }),
+        )
+        .phase_func(11, clout_to(0, 3, 1000, 11));
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    assert_eq!(d.data().puzzle_group, 3);
+    f.use_(&d);
+    assert_eq!(group(&d), 11);
+    assert!(f
+        .client
+        .drain_ops()
+        .contains(&sc::SCDoodadPuzzleScenePacket));
+    assert_eq!(f.advance(1000), 1);
+    assert_eq!(group(&d), 11);
+    assert_eq!(f.advance(5399), 0);
+    assert_eq!(f.advance(1), 1);
+    assert_eq!(group(&d), 12);
+}
+
+#[tokio::test]
+async fn audit_puzzle_roll_requires_its_item() {
+    let mut b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .func(10, "DoodadFuncPuzzleRoll", 11, FAKE_SKILL);
+    b.data
+        .func_templates
+        .entry("DoodadFuncPuzzleRoll")
+        .or_default()
+        .insert(
+            1,
+            FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll {
+                id: 1,
+                item_id: 25116,
+                count: 1,
+            }),
+        );
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.use_(&d);
+    assert_eq!(group(&d), 10);
+}
+
+#[tokio::test]
 async fn phase_change_cancels_pending_timer() {
     let b = Builder::default()
         .template(TEMPLATE, &[(10, 1), (11, 2)])

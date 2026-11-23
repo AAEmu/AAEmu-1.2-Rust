@@ -384,6 +384,8 @@ pub struct DoodadPhaseState {
     /// `FuncTask`: generation of the pending func timer (0 = none). A timer task only fires
     /// when the generation it was created with is still current (`FuncTask.Cancel` bumps it).
     pub func_task: u64,
+    /// Puzzle outcomes have their own delay, including phases with an independently timed clout.
+    pub(crate) puzzle_task: u64,
     /// `_deleted`.
     pub deleted: bool,
     /// `Despawn` (unix ms, 0 = MinValue) / `Respawn` (GameObject members).

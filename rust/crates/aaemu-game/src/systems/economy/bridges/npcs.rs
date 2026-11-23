@@ -516,6 +516,28 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         )
     }
 
+    fn try_consume_doodad_item(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        template_id: u32,
+        count: i32,
+    ) -> bool {
+        let mut txn = ItemTxn::begin(server);
+        let bag = Inv::of(player).bag();
+        let mut bag = lock(&bag);
+        if count <= 0 || bag.items_by_template_unlocked(template_id, -1).1 < count {
+            return false;
+        }
+        bag.consume_item(
+            task_type::DOODAD_INTERACTION,
+            template_id,
+            count,
+            None,
+            &mut txn.env,
+        ) == count
+    }
+
     fn bag_consume_item(
         &self,
         server: &GameServer,

@@ -107,6 +107,7 @@ pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
         d.phase.interaction_counts.clear();
         d.phase.pending_loot = None;
         d.phase.pending_loot_from_bag = false;
+        d.phase.puzzle_task = 0;
         d.phase_time_ms = now_ms(); // Save PhaseTime at start of new phase (group)
         let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
@@ -962,7 +963,14 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
     let (triggers, others): (Vec<_>, Vec<_>) = phase_funcs
         .iter()
         .partition(|pf| pf.func_type == "DoodadFuncPulseTrigger");
+    let puzzle_in = phase_funcs::select_puzzle_input(ctx, phase_funcs);
+    let puzzle_out = phase_funcs::select_puzzle_outcome(ctx, phase_funcs);
     for pf in others.into_iter().chain(triggers) {
+        match pf.func_type.as_str() {
+            "DoodadFuncPuzzleIn" if puzzle_in != Some(pf.func_id) => continue,
+            "DoodadFuncPuzzleOut" if puzzle_out != Some(pf.func_id) => continue,
+            _ => {}
+        }
         if deferred_ratio && pf.func_type == "DoodadFuncRatioChange" {
             continue;
         }

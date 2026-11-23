@@ -1057,6 +1057,7 @@ impl DoodadData {
                     delay: r.i32("delay")?,
                     next_phase: r.i32_or("next_phase", -1)?,
                     projectile_delay: r.i32("projectile_delay")?,
+                    sound_id: r.u32_or("sound_id", 0)?,
                 }))
             },
         )?;

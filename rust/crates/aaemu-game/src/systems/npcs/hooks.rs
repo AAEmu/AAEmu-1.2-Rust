@@ -493,6 +493,17 @@ pub trait EconomyBridge: Send + Sync {
     }
 
     /// `Inventory.Bag.ConsumeItem(task, templateId, count, null)`; returns the number consumed.
+    /// Consume the whole authored cost under one item transaction.
+    fn try_consume_doodad_item(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _template_id: u32,
+        _count: i32,
+    ) -> bool {
+        false
+    }
+
     fn bag_consume_item(
         &self,
         _server: &GameServer,

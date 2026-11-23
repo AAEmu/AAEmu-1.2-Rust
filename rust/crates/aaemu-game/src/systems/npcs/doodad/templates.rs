@@ -976,6 +976,7 @@ pub struct DoodadFuncPuzzleOut {
     pub delay: i32,
     pub next_phase: i32,
     pub projectile_delay: i32,
+    pub sound_id: u32,
 }
 
 /// `DoodadFuncPuzzleRoll` (`DoodadFuncTemplate`).

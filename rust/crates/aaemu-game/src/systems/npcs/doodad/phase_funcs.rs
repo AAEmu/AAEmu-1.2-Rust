@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rand::distributions::{Distribution, WeightedIndex};
 use rand::Rng;
 
 use super::phase::{self, doodad_has_matching_climate};
@@ -60,6 +61,54 @@ fn time_left_with_override(ctx: &DoodadCtx<'_>, delay: f64) -> f64 {
     }
     d.growth_time_ms = now_ms() + time_left as i64;
     time_left
+}
+
+/// Puzzle inputs and outcomes are weighted within their phase. Compact groups 14852 and 14845
+/// author 85/10/5 and four equal weights respectively, so weights need not sum to 100.
+fn weighted_puzzle_row(rows: &[(u32, f32)]) -> Option<u32> {
+    let distribution = WeightedIndex::new(rows.iter().map(|row| row.1)).ok()?;
+    Some(rows[distribution.sample(&mut rand::thread_rng())].0)
+}
+
+pub(super) fn select_puzzle_input(ctx: &DoodadCtx<'_>, phase: &[DoodadPhaseFunc]) -> Option<u32> {
+    if !phase
+        .iter()
+        .any(|row| row.func_type == "DoodadFuncPuzzleIn")
+    {
+        return None;
+    }
+    let rows: Vec<_> = phase
+        .iter()
+        .filter_map(
+            |row| match ctx.data().phase_func_template(row.func_id, &row.func_type) {
+                Some(FuncTemplate::PuzzleIn(input)) => Some((input.id, input.ratio)),
+                _ => None,
+            },
+        )
+        .collect();
+    weighted_puzzle_row(&rows)
+}
+
+pub(super) fn select_puzzle_outcome(ctx: &DoodadCtx<'_>, phase: &[DoodadPhaseFunc]) -> Option<u32> {
+    if !phase
+        .iter()
+        .any(|row| row.func_type == "DoodadFuncPuzzleOut")
+    {
+        return None;
+    }
+    let group = ctx.doodad.data().puzzle_group;
+    let rows: Vec<_> = phase
+        .iter()
+        .filter_map(
+            |row| match ctx.data().phase_func_template(row.func_id, &row.func_type) {
+                Some(FuncTemplate::PuzzleOut(outcome)) if outcome.group_id as i32 == group => {
+                    Some((outcome.id, outcome.ratio))
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    weighted_puzzle_row(&rows)
 }
 
 /// `DoodadPhaseFunc.Use(caster, owner)` → the template's `Use`. Returns `true` to stop the phase
@@ -367,7 +416,32 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         }
         FuncTemplate::CraftDirect(f) => override_if_character(ctx, caster, f.next_phase),
         FuncTemplate::Hunger(f) => override_if_character(ctx, caster, f.next_phase),
-        FuncTemplate::PuzzleOut(f) => override_if_character(ctx, caster, f.next_phase),
+        FuncTemplate::PuzzleIn(f) => {
+            // The r208022 phase handler at 0x3b6c60 passes this selector to model loading.
+            ctx.doodad.data().puzzle_group = f.group_id as i32;
+            false
+        }
+        FuncTemplate::PuzzleOut(f) => {
+            if DoodadCtx::as_player(caster).is_none() {
+                return false;
+            }
+            if !f.anim.is_empty() || f.projectile_id != 0 {
+                ctx.broadcast(&super::packets::SCDoodadPuzzleScenePacket {
+                    obj_id: ctx.doodad.obj_id,
+                    projectile_id: f.projectile_id,
+                    projectile_delay: f.projectile_delay.max(0) as u32,
+                    anim: f.anim.clone(),
+                });
+            }
+            if f.sound_id != 0 {
+                ctx.broadcast(&super::packets::SCDoodadSoundPacket {
+                    obj_id: ctx.doodad.obj_id,
+                    sound_id: f.sound_id,
+                });
+            }
+            tasks::start_puzzle_outcome(ctx, caster, f);
+            false
+        }
         // A wait, not an action: stay in this phase until period `siege_period_id` ends, then
         // move to `next_phase` (-1 = gone). The boundary is an external event, so the func is
         // passive when the phase is entered; `super::siege_phase` applies the change when the
@@ -473,7 +547,6 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         | FuncTemplate::HouseFarm(_)
         | FuncTemplate::NaviRemoveTimer(_)
         | FuncTemplate::Parrot(_)
-        | FuncTemplate::PuzzleIn(_)
         | FuncTemplate::Sign(_)
         | FuncTemplate::WaterVolume(_) => {
             tracing::trace!("{}", t.func_type());
