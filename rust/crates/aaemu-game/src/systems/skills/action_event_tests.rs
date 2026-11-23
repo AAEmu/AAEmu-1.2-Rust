@@ -313,7 +313,7 @@ async fn aggro_reset_selects_components_and_copy_registers_watchers() {
             damage_aggro: 100,
             heal_aggro: 0,
             etc_aggro: 7,
-            taunt_time: 0,
+            ..Aggro::default()
         }
     );
     execute(&server, 104, &args(&source, &target), [0; 4]);

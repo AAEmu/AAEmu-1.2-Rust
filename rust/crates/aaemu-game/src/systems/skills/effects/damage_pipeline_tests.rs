@@ -516,6 +516,110 @@ fn real_compact_db_separates_threshold_and_full_damage_immunity() {
     );
 }
 
+fn compact_damage(effect_id: u32) -> Option<Box<DamageEffect>> {
+    let path = std::env::var("AAEMU_COMPACT_DB").ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut tables = std::collections::HashMap::new();
+    skills::data::effects::load_effect_tables(&conn, &|_| true, &mut tables).unwrap();
+    let registry = skills::data::effects::load_effect_types(&conn).unwrap();
+    let link = &registry[&effect_id];
+    assert_eq!(link.actual_type, "DamageEffect");
+    let kind = skills::data::EffectKind::DamageEffect;
+    let Some(skills::data::EffectTemplate::Damage(effect)) =
+        tables.get_mut(&kind).unwrap().remove(&link.actual_id)
+    else {
+        panic!("missing damage descriptor for effect {effect_id}");
+    };
+    Some(effect)
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_compact_db_damage_engage_combat_gates_battle_but_keeps_threat() {
+    // Buff 1053's damage tick is global effect 5083 (descriptor 699).
+    let Some(mut effect) = compact_damage(5083) else {
+        return;
+    };
+    assert_eq!(effect.id, 699);
+    assert!(!effect.engage_combat);
+    let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
+    // Model an idle NPC whose damage notification transitions it into combat immediately.
+    struct StartsCombat;
+    impl skills::ext::NpcSkillHooks for StartsCombat {
+        fn npc_damage_received(
+            &self,
+            server: &GameServer,
+            npc: &crate::world::NpcRef,
+            _: &WorldObject,
+            _: i32,
+        ) {
+            unit_combat::set_in_battle(server, &npc.into(), true);
+        }
+    }
+    server
+        .systems
+        .skills
+        .ext
+        .npcs
+        .install(Arc::new(StartsCombat));
+    {
+        let mut n = npc.data();
+        n.unit.hp = 10_000;
+        n.unit.max_hp = 10_000;
+    }
+    let args = args((&player).into(), (&npc).into(), 1);
+    client.drain();
+
+    damage(&server, &effect, &args, None);
+
+    let dealt = {
+        let n = npc.data();
+        let dealt = 10_000 - n.unit.hp;
+        assert!(dealt > 0);
+        assert_eq!(
+            n.unit.skill_state.aggro_table[&player.obj_id].damage_aggro,
+            dealt
+        );
+        assert_eq!(n.unit.skill_state.tagging.taggers, [(player.obj_id, dealt)]);
+        assert!(!n.unit.is_in_battle, "disabled engage entered NPC combat");
+        assert_eq!(n.unit.last_combat_activity_ms, 0);
+        dealt
+    };
+    assert!(
+        !player.data().unit.is_in_battle,
+        "NPC threat started player combat"
+    );
+    assert_eq!(player.data().unit.last_combat_activity_ms, 0);
+    let ops = client.drain_ops();
+    assert!(ops.contains(&sc::SCUnitDamagedPacket));
+    assert!(ops.contains(&sc::SCAiAggroPacket));
+    assert!(!ops.contains(&sc::SCCombatFirstHitPacket));
+
+    // The next engaging hit still announces combat for the existing threat entry.
+    effect.engage_combat = true;
+    damage(&server, &effect, &args, None);
+    assert!(player.data().unit.is_in_battle);
+    assert!(npc.data().unit.is_in_battle);
+    assert!(npc.data().unit.skill_state.aggro_table[&player.obj_id].damage_aggro > dealt);
+    assert!(client.drain_ops().contains(&sc::SCCombatFirstHitPacket));
+    damage(&server, &effect, &args, None);
+    assert!(!client.drain_ops().contains(&sc::SCCombatFirstHitPacket));
+
+    // A disabled hit keeps the existing battle state and does not refresh either timer.
+    player.data().unit.last_combat_activity_ms = 1;
+    npc.data().unit.last_combat_activity_ms = 1;
+    effect.engage_combat = false;
+    damage(&server, &effect, &args, None);
+    for obj in [WorldObject::from(&player), WorldObject::from(&npc)] {
+        obj.with_unit(|u| {
+            assert!(u.unit().is_in_battle);
+            assert_eq!(u.unit().last_combat_activity_ms, 1);
+        });
+    }
+}
+
 #[tokio::test]
 async fn damage_pipeline_nonunit_sources_and_hostile_target_authority() {
     let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());

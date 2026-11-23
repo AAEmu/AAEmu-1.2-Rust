@@ -901,7 +901,7 @@ pub(super) fn damage_with_aoe(
     }
     let now = now_ms();
     let trg_alive = trg.with_unit(|u| u.unit().hp > 0).unwrap_or(false);
-    if trg_alive {
+    if e.engage_combat && trg_alive {
         unit_combat::mark_combat_activity(&trg, now);
     }
     if let (Some(tp), Some(_)) = (trg.as_player(), caster.as_player()) {
@@ -912,7 +912,9 @@ pub(super) fn damage_with_aoe(
             None => hp.push((caster.obj_id(), now)),
         }
     }
-    if trg_alive || caster.with_unit(|u| u.unit().is_in_battle).unwrap_or(false) {
+    if e.engage_combat
+        && (trg_alive || caster.with_unit(|u| u.unit().is_in_battle).unwrap_or(false))
+    {
         unit_combat::mark_combat_activity(&caster, now);
     }
     // Item procs of the hit (attacker kinds 1-8, victim kinds 9-16), before the combat buffs as
@@ -953,20 +955,31 @@ pub(super) fn damage_with_aoe(
         );
         // Npc.OnDamageReceived: aggro + AI (npc subsystem)
         let threat = ((value as f32 * e.aggro_multiplier) as i32).max(0);
-        unit_combat::add_damage_aggro(server, &trg, &caster, value, threat);
-        server
-            .systems
-            .skills
-            .ext
-            .npcs()
-            .npc_damage_received(server, n, &caster, value);
+        unit_combat::add_damage_aggro_with_combat(
+            server,
+            &trg,
+            &caster,
+            value,
+            threat,
+            e.engage_combat,
+        );
+        // The AI damage notification can transition directly into its attack behavior.
+        if e.engage_combat {
+            server
+                .systems
+                .skills
+                .ext
+                .npcs()
+                .npc_damage_received(server, n, &caster, value);
+        }
     }
     // 10.x aggro-link guard help (Z:823528-823950) runs on the victim's hostile-aggro event.
     // An NPC victim reaches it from its own AI (`update_aggro_help`); players, mates and slaves
     // have no victim AI, so the damage applies it here (the caller-side gate re-checks
     // `system_factions.guard_help` before scanning around the victim). Misses, immunity and
     // other no-damage paths returned above, and a zero hit never pulls a guard.
-    if trg.as_npc().is_none() && value > 0 {
+    // Pulling a guard through this path would start combat for the attacker.
+    if e.engage_combat && trg.as_npc().is_none() && value > 0 {
         crate::systems::ai::behaviors::update_guard_help(server, &trg, &caster);
     }
     buffs::fire_unit_event(server, caster.obj_id(), BuffEventTriggerKind::Attack, 0);

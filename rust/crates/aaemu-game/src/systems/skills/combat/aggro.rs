@@ -111,7 +111,7 @@ pub fn add_unit_aggro(
     unit: &WorldObject,
     amount: i32,
 ) -> bool {
-    add_aggro_amounts(server, owner, kind, unit, amount, None)
+    add_aggro_amounts(server, owner, kind, unit, amount, None, true)
 }
 
 /// Damage effects award actual damage credit independently of their authored threat.
@@ -123,6 +123,18 @@ pub fn add_damage_aggro(
     damage: i32,
     threat: i32,
 ) -> bool {
+    add_damage_aggro_with_combat(server, owner, unit, damage, threat, true)
+}
+
+/// Records damage threat even when the hit does not announce combat.
+pub(in crate::systems::skills) fn add_damage_aggro_with_combat(
+    server: &GameServer,
+    owner: &WorldObject,
+    unit: &WorldObject,
+    damage: i32,
+    threat: i32,
+    engage_combat: bool,
+) -> bool {
     add_aggro_amounts(
         server,
         owner,
@@ -130,6 +142,7 @@ pub fn add_damage_aggro(
         unit,
         threat.max(0),
         Some(damage.max(0)),
+        engage_combat,
     )
 }
 
@@ -156,6 +169,7 @@ fn add_aggro_amounts(
     unit: &WorldObject,
     amount: i32,
     damage_credit: Option<i32>,
+    engage_combat: bool,
 ) -> bool {
     if refuses_foreign_aggro(server, owner, unit) {
         return false;
@@ -186,7 +200,7 @@ fn add_aggro_amounts(
             .with_unit(|u| u.unit().skill_state.aggro_table.contains_key(&unit_id))
             .unwrap_or(false);
     }
-    let existed = owner
+    let (existed, announce_combat) = owner
         .with_unit(|u| {
             let table = &mut u.unit_mut().skill_state.aggro_table;
             match table.get_mut(&unit_id) {
@@ -196,17 +210,22 @@ fn add_aggro_amounts(
                     } else {
                         a.add(kind, amount);
                     }
-                    true
+                    let announce_combat =
+                        engage_combat && std::mem::take(&mut a.combat_notice_pending);
+                    (true, announce_combat)
                 }
                 None => {
-                    let mut a = Aggro::default();
+                    let mut a = Aggro {
+                        combat_notice_pending: !engage_combat,
+                        ..Aggro::default()
+                    };
                     a.add(kind, amount);
                     table.insert(unit_id, a);
-                    false
+                    (false, engage_combat)
                 }
             }
         })
-        .unwrap_or(false);
+        .unwrap_or((false, engage_combat));
     let player = unit.as_player().cloned();
     if !existed {
         server
@@ -237,6 +256,8 @@ fn add_aggro_amounts(
                     .engage_combat_quest(server, p, quest, n.obj_id);
             }
         }
+    }
+    if announce_combat {
         // The first-hit packet puts both player participants in combat on the client,
         // even for sight aggro or a call for help that deals no damage.
         let now = now_ms();

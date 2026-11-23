@@ -253,6 +253,8 @@ pub struct Aggro {
     /// (`systems::ai::behaviors::sorted_abusers`). 10.x-only (`NpcAggroTable` entry `+24`):
     /// the 1.2 client and the C# have no taunt logic.
     pub taunt_time: u64,
+    /// This entry gained threat before a combat-engaging action announced it.
+    pub(crate) combat_notice_pending: bool,
 }
 
 impl Aggro {
