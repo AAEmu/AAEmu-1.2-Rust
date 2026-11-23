@@ -16,6 +16,7 @@ pub mod howling_abyss;
 mod library;
 pub mod palace_cellar;
 mod plateau;
+mod red_dragon;
 pub mod registry;
 pub mod sharpwind;
 

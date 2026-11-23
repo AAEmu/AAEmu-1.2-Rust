@@ -377,3 +377,11 @@ pub(crate) fn melee_chase_range(
 pub fn keeps_inactive_spawners(world_name: &str) -> bool {
     super::library::keeps_inactive_spawners(world_name)
 }
+
+#[cfg(test)]
+pub(crate) use super::red_dragon::RED_DRAGON_EGG_SKILL;
+
+/// The egg's summon skill needs its doodad operation serialized.
+pub fn is_red_dragon_egg_skill(skill_id: u32) -> bool {
+    super::red_dragon::is_red_dragon_egg_skill(skill_id)
+}

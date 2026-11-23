@@ -2406,7 +2406,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     // Serialize the readiness check, phase change and reward or spawn. A
     // concurrent cast may finish after the first changed the doodad phase.
-    let egg_cast = t.id == super::validation::RED_DRAGON_EGG_SKILL;
+    let egg_cast = encounters::is_red_dragon_egg_skill(t.id);
     let cradle_chest = t.id == super::validation::CRADLE_CHEST_SKILL;
     let _doodad_operation =
         (egg_cast || cradle_chest).then(|| server.systems.economy.operation_scope());

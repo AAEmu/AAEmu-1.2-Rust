@@ -15,7 +15,8 @@ use crate::systems::economy::inventory::Inv;
 pub(crate) const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
 /// Extra range for a slave target (large ships are centred far from their hull edge).
 const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
-pub(super) const RED_DRAGON_EGG_SKILL: u32 = 23_150;
+#[cfg(test)]
+pub(super) use encounters::RED_DRAGON_EGG_SKILL;
 pub(super) const PORTABLE_HARPOON_MIN_RANGE: f64 = 4.0;
 pub(super) const PORTABLE_HARPOON_MAX_RANGE: f64 = 45.0;
 
@@ -364,7 +365,7 @@ pub(super) fn check(
     {
         return fail("skill_need_reagent");
     }
-    if template.id == RED_DRAGON_EGG_SKILL {
+    if encounters::is_red_dragon_egg_skill(template.id) {
         check_red_dragon_egg(server, caster, target)?;
     }
     // Like the other cast restrictions, this also applies to administrators. A GM's
