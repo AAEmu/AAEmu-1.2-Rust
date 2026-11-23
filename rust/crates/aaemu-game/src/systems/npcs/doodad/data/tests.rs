@@ -380,8 +380,8 @@ fn partial_load_from_sqlite() {
             "CREATE TABLE doodad_func_groups (id INT, model TEXT, doodad_almighty_id INT, doodad_func_group_kind_id INT, sound_id INT, phase_msg TEXT, is_msg_to_zone TEXT);
              INSERT INTO doodad_func_groups VALUES (11, 'm', 2, 2, NULL, NULL, 'f'), (10, 'm', 2, 1, 5, 'door opened', 't'), (12, 'm', 1, 1, NULL, '  ', NULL), (10, 'dup', 1, 1, NULL, NULL, NULL),
                   (17231, 'prefab://prefabs/fish.xml/fish_school.ocean_inactive', 6448, 2, NULL, NULL, 'f');
-             CREATE TABLE doodad_funcs (id INT, doodad_func_group_id INT, actual_func_id INT, actual_func_type TEXT, next_phase INT, sound_id INT, func_skill_id INT, perm_id INT, act_count INT);
-             INSERT INTO doodad_funcs VALUES (2, 10, 9, 'DoodadFuncFakeUse', NULL, NULL, NULL, 1, NULL), (1, 10, 3, 'DoodadFuncCoffer', 11, 4, 77, 0, 2);
+             CREATE TABLE doodad_funcs (id INT, doodad_func_group_id INT, actual_func_id INT, actual_func_type TEXT, next_phase INT, sound_id INT, func_skill_id INT, perm_id INT, act_count INT, forbid_on_climb TEXT);
+             INSERT INTO doodad_funcs VALUES (2, 10, 9, 'DoodadFuncFakeUse', NULL, NULL, NULL, 1, NULL, 'f'), (1, 10, 3, 'DoodadFuncCoffer', 11, 4, 77, 0, 2, 'f');
              CREATE TABLE doodad_func_coffers (id INT, capacity INT);
              INSERT INTO doodad_func_coffers VALUES (3, 150);
              CREATE TABLE doodad_func_fake_uses (id INT, skill_id INT, fake_skill_id INT, target_parent TEXT);
@@ -517,6 +517,23 @@ fn count(c: &Connection, table: &str) -> usize {
         r.get::<_, i64>(0)
     })
     .unwrap() as usize
+}
+
+#[test]
+#[ignore]
+fn audit_climb_flags_filter_authored_interactions() {
+    let path = std::env::var("AAEMU_COMPACT_DB").unwrap();
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let data = DoodadData::load_from(&c).unwrap();
+    for group in [11802, 23048] {
+        let flags: Vec<_> = data
+            .funcs_for_group(group)
+            .iter()
+            .filter(|func| data.forbids_climbing(func.func_key))
+            .map(|func| func.func_key)
+            .collect();
+        assert_eq!(flags, if group == 11802 { [10308] } else { [19467] });
+    }
 }
 
 #[test]

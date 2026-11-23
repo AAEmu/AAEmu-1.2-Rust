@@ -138,7 +138,14 @@ pub fn allows_func(
     player: &PlayerRef,
     func: &DoodadFunc,
 ) -> bool {
-    allows(server, world, doodad, player, func.perm_id)
+    !(player.core().is_climbing()
+        && server
+            .game_data
+            .systems
+            .npcs
+            .doodad
+            .forbids_climbing(func.func_key))
+        && allows(server, world, doodad, player, func.perm_id)
 }
 
 fn in_same_family(server: &GameServer, player: &PlayerRef, owner: u32) -> bool {

@@ -71,6 +71,8 @@ pub struct DoodadData {
     pub funcs_by_groups: HashMap<u32, Vec<DoodadFunc>>,
     /// `_funcsById` (by `FuncKey`).
     pub funcs_by_id: HashMap<u32, DoodadFunc>,
+    /// Use rows hidden while climbing by the r208022 option builder at 0x3cd290.
+    pub(crate) forbid_on_climb: HashSet<u32>,
     /// `_phaseFuncs`.
     pub phase_funcs: HashMap<u32, Vec<DoodadPhaseFunc>>,
     /// `_funcTemplates` (classes deriving from `DoodadFuncTemplate`).
@@ -147,8 +149,12 @@ impl DoodadData {
             "SELECT * FROM doodad_funcs ORDER BY doodad_func_group_id, actual_func_id",
             [],
             |r| {
+                let func_key = r.u32("id")?;
+                if r.bool_str("forbid_on_climb")? {
+                    self.forbid_on_climb.insert(func_key);
+                }
                 funcs.push(DoodadFunc {
-                    func_key: r.u32("id")?,
+                    func_key,
                     group_id: r.u32("doodad_func_group_id")?,
                     func_id: r.u32("actual_func_id")?,
                     func_type: r.string("actual_func_type")?,
@@ -465,6 +471,10 @@ impl DoodadData {
     /// `DoodadManager.GetTemplate`.
     pub fn template(&self, template_id: u32) -> Option<&DoodadTemplate> {
         self.templates.get(&template_id)
+    }
+
+    pub fn forbids_climbing(&self, func_key: u32) -> bool {
+        self.forbid_on_climb.contains(&func_key)
     }
 
     /// `GetFunc(funcId)` (by `FuncKey`, the `doodad_funcs` row id).
