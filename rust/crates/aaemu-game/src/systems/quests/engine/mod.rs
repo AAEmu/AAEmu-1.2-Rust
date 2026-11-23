@@ -532,10 +532,19 @@ impl<'a> Ctx<'a> {
         let Some(si) = q.step_index(q.step) else {
             return false;
         };
-        if q.step == kind::REWARD
-            && !self.valid_reward_choice(q.template_id, q.selected_reward_index)
-        {
-            return false;
+        if q.step == kind::REWARD {
+            let selected = q.selected_reward_index;
+            if selected == 0 && !self.has_reward_report(q.template_id) {
+                // The 1.2 Progress-to-Reward quests (e.g. 3238, 4291) have no
+                // report dialogue where the client can send a selective index.
+                let template_id = q.template_id;
+                let default = self.automatic_reward_choice(template_id);
+                if let Some(q) = self.quest_mut(h) {
+                    q.selected_reward_index = default;
+                }
+            } else if !self.valid_reward_choice(q.template_id, selected) {
+                return false;
+            }
         }
         let mut res = self.run_components(h, si);
 
@@ -727,6 +736,44 @@ impl<'a> Ctx<'a> {
                 .filter(|&&a| matches!(data.acts[a].kind, ActKind::SupplySelectiveItem { .. }))
                 .count() as i32
         })
+    }
+
+    fn has_reward_report(&self, template_id: u32) -> bool {
+        self.data.template(template_id).is_some_and(|template| {
+            template
+                .components_of(&self.data.components, kind::READY)
+                .iter()
+                .flat_map(|component| &component.acts)
+                .any(|&act| {
+                    matches!(
+                        self.data.acts[act].kind,
+                        ActKind::ConReportNpc { .. }
+                            | ActKind::ConReportDoodad { .. }
+                            | ActKind::ConReportJournal
+                    )
+                })
+        })
+    }
+
+    fn automatic_reward_choice(&self, template_id: u32) -> i32 {
+        let Some(template) = self.data.template(template_id) else {
+            return 0;
+        };
+        template
+            .components_of(&self.data.components, kind::REWARD)
+            .into_iter()
+            .flat_map(|component| &component.acts)
+            .map(|&act| &self.data.acts[act])
+            .filter_map(|act| match act.kind {
+                ActKind::SupplySelectiveItem { item_id, .. }
+                    if act.count > 0 && self.usable_reward_item(item_id) =>
+                {
+                    Some(act.selective_index)
+                }
+                _ => None,
+            })
+            .min()
+            .unwrap_or(0)
     }
 
     /// r208022 0x4b1f30 indexes the authored Reward choices from one.

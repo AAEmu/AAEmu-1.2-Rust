@@ -5221,6 +5221,84 @@ async fn real_compact_db_quest_reward_degree_and_player_gap() {
 }
 
 #[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_quest_rewards_skip_unusable_items() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.items = ItemData::load(&conn).unwrap();
+    gd.systems.quests = real_data(&conn);
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    for (quest_id, selected) in [(991, 1), (1005, 1), (3238, 0)] {
+        for bag_slots in [0, 10] {
+            let mut c = character();
+            c.unit.level = 22;
+            c.inventory = crate::models::character::Inventory::standalone(1, bag_slots, 0);
+            with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+                let h = ctx.new_quest(quest_id, 1);
+                rec.take();
+                if quest_id == 3238 {
+                    ctx.st.quest_mut(h).unwrap().init_finished = true;
+                    ctx.set_step(h, kind::PROGRESS);
+                    give_item(ctx.c, 19505, 5);
+                    ctx.dispatch(&QuestEvent::ItemGather {
+                        item_id: 19505,
+                        count: 5,
+                    })
+                    .unwrap();
+                    drain(ctx);
+                } else {
+                    ctx.set_step(h, kind::REWARD);
+                    ctx.st.quest_mut(h).unwrap().selected_reward_index = selected;
+                    assert!(ctx.run_current_step(h), "quest {quest_id}");
+                }
+                assert!(ctx.has_quest_completed(quest_id), "quest {quest_id}");
+            });
+            let calls = rec.take();
+            assert!(
+                calls.iter().any(|call| call.starts_with("exp "))
+                    && calls.iter().any(|call| call.starts_with("money "))
+                    && !calls
+                        .iter()
+                        .any(|call| call.starts_with("mail ") || call.starts_with("item ")),
+                "quest {quest_id} with {bag_slots} slots: {calls:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_quest_automatic_selective_reward_uses_first_option() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.items = ItemData::load(&conn).unwrap();
+    gd.systems.quests = real_data(&conn);
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = ctx.new_quest(4291, 1);
+        ctx.set_step(h, kind::REWARD);
+        assert!(ctx.run_current_step(h));
+        assert!(ctx.has_quest_completed(4291));
+    });
+    let calls = rec.take();
+    let items: Vec<_> = calls
+        .iter()
+        .filter(|call| call.starts_with("item "))
+        .collect();
+    assert_eq!(items.len(), 1, "{calls:?}");
+    assert!(items[0].contains(" 24061 "), "{calls:?}");
+}
+
+#[tokio::test]
 #[ignore]
 async fn real_compact_db_quest_reward_first_exp_act_wins() {
     let Some(conn) = real_db() else {

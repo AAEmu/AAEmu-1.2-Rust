@@ -9,6 +9,16 @@ fn round_even(v: f64) -> f64 {
 }
 
 impl<'a> Ctx<'a> {
+    /// Some r208022 reward rows (e.g. 991 → 16390) have a class-specific item
+    /// row but no base `items` row, so the runtime template has no stack capacity.
+    pub(super) fn usable_reward_item(&self, template_id: u32) -> bool {
+        self.server
+            .game_data
+            .items
+            .template(template_id)
+            .is_some_and(|item| item.max_count > 0)
+    }
+
     /// Count newly occupied bag slots across the entire payout, including repeated
     /// definitions sharing a grade and quantities that span multiple stacks.
     fn reward_items_fit_bag(&self, pool: &[ItemCreationDefinition]) -> bool {
@@ -110,11 +120,10 @@ impl<'a> Ctx<'a> {
         let mut copper = round_even(f64::from(copper) * copper_ratio) as i32;
 
         if !q.reward_items.is_empty() && q.allow_item_rewards {
-            let items = &self.server.game_data.items;
             let pool: Vec<ItemCreationDefinition> = q
                 .reward_items
                 .iter()
-                .filter(|item| item.count > 0 && items.template(item.template_id).is_some())
+                .filter(|item| item.count > 0 && self.usable_reward_item(item.template_id))
                 .cloned()
                 .collect();
             if let Some(q) = self.quest_mut(h) {
