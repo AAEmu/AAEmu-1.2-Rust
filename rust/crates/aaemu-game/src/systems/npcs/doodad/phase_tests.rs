@@ -2428,14 +2428,22 @@ async fn spawned_doodad_clout_with_origin_source_borrows_a_doodad_near_the_caste
 
 /// An NPC at (100, 100) that owns the doodads its skills summon.
 fn spawn_owner_npc(server: &GameServer, world: &Arc<WorldInstance>) -> WorldObject {
+    // Putrid Demon (11357), the caster of the real Poison Belch, has faction 115.
+    spawn_owner_npc_with_faction(server, world, HAZARD_OWNER_FACTION)
+}
+
+fn spawn_owner_npc_with_faction(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    faction_id: u32,
+) -> WorldObject {
     let npc = crate::world::object::Entity::new(
         server.ids.object.get_next_id().unwrap(),
         crate::models::npc::Npc::new(1),
     );
     {
         let mut n = npc.data();
-        // Putrid Demon (11357), the caster of the real Poison Belch, has faction 115.
-        n.unit.faction_id = HAZARD_OWNER_FACTION;
+        n.unit.faction_id = faction_id;
         n.unit
             .transform
             .set_position(100.0, 100.0, 100.0, 0.0, 0.0, 0.0);
@@ -2500,6 +2508,60 @@ async fn npc_summoned_origin_clout_casts_as_its_npc_at_its_own_doodad() {
         // allies, so only its beneficial buffs apply (none here).
         assert_eq!(trigger.effects_per_buff.get(&0), Some(&effects));
     }
+}
+
+#[tokio::test]
+async fn hostile_clout_of_an_owner_without_a_known_faction_keeps_only_good_buffs() {
+    // A Hostile relation from a caster whose faction is not in the data cannot pick a side
+    // (`can_attack`'s missing-faction branch admits everyone, the summoner included), so the
+    // payload falls back to beneficial buffs.
+    use crate::systems::npcs::area_trigger::skill_target_relation::HOSTILE;
+    const UNKNOWN_FACTION: u32 = 9_999;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, npc_hazard_clout(HOSTILE, 77))
+        .clout_server(631, comet_shape());
+    let world = server.world.world(0).unwrap();
+    let npc = spawn_owner_npc_with_faction(&server, &world, UNKNOWN_FACTION);
+    let owner = manager::create(&server, &world, 0x500, TEMPLATE, Some(&npc), true).unwrap();
+    owner.data().transform.set_xyz(104.5, 100.0, 100.0);
+    manager::spawn(&server, &world, &owner);
+    manager::init_doodad(&server, &world, &owner);
+
+    let attached = server.systems.npcs.area_triggers.attached_to(owner.obj_id);
+    assert_eq!(attached.len(), 1);
+    assert_eq!(
+        attached[0].caster.as_ref().map(WorldObject::obj_id),
+        Some(npc.obj_id()),
+        "the summoning NPC is still the origin source"
+    );
+    assert_eq!(attached[0].effects_per_buff.get(&0), Some(&Vec::new()));
+}
+
+#[tokio::test]
+async fn ownerless_placed_hazard_without_an_inside_buff_applies_its_full_payload() {
+    // A placed environmental hazard (no owner unit, no supplied caster) carries its linked
+    // effects. Before, every clout without an inside buff kept only its beneficial buffs.
+    use crate::systems::npcs::area_trigger::skill_target_relation::ANY;
+    const EFFECT: u32 = 77;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, npc_hazard_clout(ANY, EFFECT))
+        .clout_server(631, comet_shape());
+    let world = server.world.world(0).unwrap();
+    let placed = manager::create(&server, &world, 0x500, TEMPLATE, None, true).unwrap();
+    placed.data().transform.set_xyz(104.5, 100.0, 100.0);
+    manager::spawn(&server, &world, &placed);
+    let ctx = DoodadCtx::new(&server, world.clone(), placed.clone());
+    do_change_phase(&ctx, None, 10);
+
+    let attached = server.systems.npcs.area_triggers.attached_to(placed.obj_id);
+    assert_eq!(attached.len(), 1);
+    assert_eq!(
+        attached[0].caster.as_ref().map(WorldObject::obj_id),
+        Some(placed.obj_id)
+    );
+    assert_eq!(attached[0].effects_per_buff.get(&0), Some(&vec![EFFECT]));
 }
 
 #[tokio::test]
