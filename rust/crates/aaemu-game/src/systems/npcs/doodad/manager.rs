@@ -233,6 +233,11 @@ pub fn create(
 
 /// `Doodad.Spawn()` (`GameObject.Spawn`: AddObject + Show, then the zone change dispatch).
 pub fn spawn(server: &GameServer, world: &Arc<WorldInstance>, doodad: &DoodadRef) {
+    super::phase_funcs::refresh_growth_scale_deadline(&DoodadCtx::new(
+        server,
+        world.clone(),
+        doodad.clone(),
+    ));
     let changes = world.spawn(doodad, &server.view_ctx());
     server.systems.npcs.fish_schools.track(world, doodad);
     crate::world::session::handle_zone_changes(server, changes);

@@ -244,6 +244,17 @@ impl Doodad {
         0
     }
 
+    /// r208022 RVA 0x3b4810 uses a nonzero wire delay for scale animation. Inferred from
+    /// compact group 9439, which authors both a growth and a separate timer: send the
+    /// growth deadline when scale changes. One millisecond bypasses the client's fallback
+    /// to the full descriptor delay after the animation deadline has elapsed.
+    pub(crate) fn phase_wire_time_left(&self, now_ms: i64) -> u32 {
+        self.phase.growth_scale_end_ms.map_or_else(
+            || self.time_left(now_ms),
+            |end| end.saturating_sub(now_ms).clamp(1, i64::from(u32::MAX)) as u32,
+        )
+    }
+
     /// `hasLootItem` of `Write`: the phase is driven exclusively by loot / recover funcs.
     pub fn has_loot_item(&self) -> bool {
         !self.current_func_types.is_empty()
@@ -291,7 +302,7 @@ impl Doodad {
             .write_u64(self.ucc_id)
             .write_u32(self.item_template_id)
             .write_u32(self.type2)
-            .write_u32(self.time_left(now_ms))
+            .write_u32(self.phase_wire_time_left(now_ms))
             .write_i64(self.plant_time)
             .write_u32(self.quest_glow)
             .write_i32(0) // family
@@ -392,6 +403,8 @@ pub struct DoodadPhaseState {
     /// `DoodadFuncFinal.After` of the first `Final { After > 0 }` phase func of the current
     /// phase (`TimeLeft` cache: `final_phase_end_ms = PhaseTime + After`).
     pub final_after_ms: Option<i32>,
+    /// End of the authored scale animation for the active group.
+    pub growth_scale_end_ms: Option<i64>,
     /// Set on a `DoodadFuncRatioRespawn` replacement until its entry phase has run: its
     /// `DoodadFuncTod` funcs must not take the `curTime >= Tod` catch-up (see
     /// `phase_funcs::use_phase_func`).

@@ -4818,3 +4818,124 @@ async fn real_compact_db_fish_schools_partition_all_species_and_activate_buff_wi
         );
     }
 }
+
+fn harvest_audit_data() -> DoodadData {
+    let path = std::env::var("AAEMU_COMPACT_DB").expect("AAEMU_COMPACT_DB");
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    DoodadData::load_from(&conn).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_growth_carries_offline_time_through_two_deadlines() {
+    use crate::systems::npcs::doodad::natural::{self, StateRow};
+
+    let f = fx(Builder {
+        data: harvest_audit_data(),
+        ..Default::default()
+    });
+    let phase_time_ms = now_ms() - 6_000_000;
+    let key = natural::spawn_key(1017, 120.0, 130.0, 100.0);
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .persistence
+        .natural
+        .enable_for_test(vec![StateRow {
+            world_id: 0,
+            spawn_key: key,
+            template_id: 1017,
+            func_group_id: 1489,
+            plant_time: phase_time_ms / 1000,
+            growth_time_ms: 0,
+            phase_time_ms,
+            data: 0,
+            interaction_counts: "{}".into(),
+            updated: 0,
+        }]);
+
+    let d = new_spawner(1017, 501)
+        .spawn(&f.server, 0)
+        .expect("restored");
+    assert_eq!(group(&d), 1489);
+    f.advance(1);
+    assert_eq!(group(&d), 1490);
+    f.advance(1);
+    assert_eq!(group(&d), 1491);
+    let d = d.data();
+    assert_eq!(d.phase_time_ms, phase_time_ms + 1_028_572 + 4_114_286);
+    assert_eq!(d.growth_time_ms, d.phase_time_ms + 5_142_858);
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_growth_scale_uses_client_endpoints_and_remaining_delay() {
+    let mut f = fx(Builder {
+        data: harvest_audit_data(),
+        ..Default::default()
+    });
+    let ctx_data = &f.server.game_data.systems.npcs.doodad;
+    let Some(FuncTemplate::Growth(growth)) = ctx_data.phase_func_template(1047, "DoodadFuncGrowth")
+    else {
+        panic!("missing growth descriptor 1047");
+    };
+    assert_eq!(
+        (growth.start_scale, growth.end_scale, growth.delay),
+        (300, 1000, 30_000)
+    );
+    let d = f.doodad(5059);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d.clone());
+    let d = d.data();
+    let packet = SCDoodadPhaseChangedPacket::new(ctx.doodad.obj_id, &d, d.phase_time_ms);
+    assert_eq!((packet.func_group_id, packet.time_left), (13149, 30_000));
+    let packet = SCDoodadPhaseChangedPacket::new(ctx.doodad.obj_id, &d, d.phase_time_ms + 15_000);
+    assert_eq!((packet.func_group_id, packet.time_left), (13149, 15_000));
+    assert_eq!(d.scale, 1.0);
+    drop(d);
+
+    // The persistent loader supplies both saved timestamps before running phase entry.
+    let phase_time_ms = now_ms() - 15_000;
+    {
+        let mut d = ctx.doodad.data();
+        d.phase_time_ms = phase_time_ms;
+        d.phase.override_phase_time_ms = phase_time_ms;
+    }
+    init_doodad(&ctx);
+    let d = ctx.doodad.data();
+    assert_eq!(d.func_group_id, 13149);
+    assert_eq!(d.growth_time_ms, phase_time_ms + 30_000);
+    assert_eq!(d.scale, 1.0);
+    drop(d);
+
+    // Compact group 9439 runs both Growth 1083 (1000 -> 1500) and Timer 3021.
+    // At 2x growth speed the timer still runs for 1000 ms, while the animation needs 500 ms.
+    f.server.systems.npcs.doodads.set_growth_rate(2.0);
+    let d = manager::create(&f.server, &f.world, 0x501, 3768, None, true).unwrap();
+    d.data().transform.set_xyz(120.0, 130.0, 100.0);
+    set_func_group_id(&f.server, &d, 9439);
+    manager::spawn(&f.server, &f.world, &d);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d);
+    init_doodad(&ctx);
+    let d = ctx.doodad.data();
+    let packet = SCDoodadPhaseChangedPacket::new(ctx.doodad.obj_id, &d, d.phase_time_ms);
+    assert_eq!((packet.func_group_id, packet.time_left), (9439, 500));
+    assert!(
+        d.time_left(d.phase_time_ms) >= 1000,
+        "timer remains independent"
+    );
+    let mut snapshot = aaemu_commons::PacketStream::new();
+    d.write(
+        ctx.doodad.obj_id,
+        &d.transform.local(),
+        d.phase_time_ms + 250,
+        &mut snapshot,
+    );
+    let snapshot = snapshot.into_bytes();
+    assert_eq!(
+        u32::from_le_bytes(snapshot[58..62].try_into().unwrap()),
+        250
+    );
+}

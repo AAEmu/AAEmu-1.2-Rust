@@ -20,15 +20,15 @@ use super::runtime::DoodadCtx;
 use super::spawner::DoodadSpawner;
 use crate::server::GameServer;
 use crate::systems::npcs::area_trigger::{self, AreaTrigger};
-use crate::world::{DoodadRef, WorldInstance, WorldObject};
+use crate::world::{now_ms, DoodadRef, WorldInstance, WorldObject};
 
 /// What a scheduled doodad task does when it fires.
 #[derive(Debug, Clone)]
 pub enum FuncTaskKind {
     /// `DoodadFuncTimerTask(caster, owner, 0, nextPhase)`.
     Timer { next_phase: i32 },
-    /// `DoodadFuncGrowthTask(caster, owner, 0, nextPhase, endScale)`.
-    Growth { next_phase: i32, end_scale: f32 },
+    /// Completes a growth phase and passes its scheduled deadline to the successor.
+    Growth { next_phase: i32, due_ms: i64 },
     /// `DoodadFuncCloutTask(caster, owner, 0, nextPhase, areaTrigger)`.
     Clout {
         next_phase: i32,
@@ -482,19 +482,13 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
                 }
             }
         }
-        FuncTaskKind::Growth {
-            next_phase,
-            end_scale,
-        } => {
+        FuncTaskKind::Growth { next_phase, due_ms } => {
             tracing::trace!(
                 "[Doodad] DoodadFuncGrowthTask: Doodad {}, TemplateId {template_id}. Using skill 0 with doodad phase {func_group_id}",
                 ctx.doodad.obj_id
             );
-            // C# `_owner.Scale = endScale` assigns BaseUnit.Scale, which Doodad.Scale (get-only
-            // override returning `_scale`) never reads: the visible scale does not change.
-            let _ = end_scale;
             ctx.doodad.data().phase.func_task = 0;
-            phase::do_change_phase(&ctx, caster, next_phase);
+            phase::do_change_phase_at(&ctx, caster, next_phase, Some(due_ms.min(now_ms())));
         }
         FuncTaskKind::Clout {
             next_phase,
