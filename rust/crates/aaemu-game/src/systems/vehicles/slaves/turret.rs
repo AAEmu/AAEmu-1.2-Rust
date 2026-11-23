@@ -102,7 +102,7 @@ pub fn set_turret_state(
 }
 
 /// Trailing relay of the newest stored turret aim once the [`TURRET_STATE_MIN_INTERVAL_MS`]
-/// window has passed. The 1 s slave tick ([`regen_tick`] via `vehicles::active_region_tick`)
+/// window has passed. The 1 s slave tick ([`regen_tick`](super::damage::regen_tick) via `vehicles::active_region_tick`)
 /// calls this, so an aim suppressed by the window still reaches the players around; an aim
 /// that reverted to the one they already have is not relayed again.
 pub fn flush_pending_turret_state(server: &GameServer, slave: &SlaveRef) {

@@ -57,7 +57,7 @@ pub fn raid_chat(server: &GameServer, team: &Team) -> crate::managers::chat::Cha
 }
 
 /// Whether `p` still is a member of `team_id` after one of its join effects was applied (one
-/// short state lock, nothing else under it: [`TeamManager::is_member_now`]).
+/// short state lock, nothing else under it: [`TeamManager::is_member_now`](super::TeamManager::is_member_now)).
 fn still_member(server: &GameServer, team_id: u32, p: &PlayerRef) -> bool {
     let teams = &server.systems.social.teams;
     #[cfg(test)]
