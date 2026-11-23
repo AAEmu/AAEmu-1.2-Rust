@@ -304,7 +304,14 @@ fn craft_on_shipyard(server: &GameServer, world_interaction: u32, args: &EffectA
         _ => default_branch(server, &character, &shipyard, world_interaction, wi_group),
     }
     let tpl = shipyard.data().unit.template_id;
-    crate::systems::quests::events::on_doodad_interaction(server, &character, &character, tpl);
+    crate::systems::quests::events::on_world_interaction(
+        server,
+        &character,
+        &character,
+        tpl,
+        world_interaction as i32,
+        0,
+    );
     true
 }
 

@@ -953,15 +953,26 @@ impl Ctx<'_> {
             (
                 ObjInteraction {
                     doodad_id,
+                    wi_id,
+                    phase,
                     team_share,
                     ..
                 },
                 QuestEvent::Interaction {
                     doodad_id: d,
+                    wi_id: actual_wi,
+                    phase: actual_phase,
                     source_player_id,
                 },
             ) => {
-                if d != doodad_id {
+                // r208022 RVA 0x89a680 loads all three selectors. The compact
+                // allows a WI without a doodad (3742) and authors destination
+                // phases (991 uses 5522, the next phase of function 4664).
+                if (*doodad_id == 0 && *wi_id <= 0)
+                    || (*doodad_id != 0 && d != doodad_id)
+                    || (*wi_id > 0 && actual_wi != wi_id)
+                    || (*phase != 0 && actual_phase != phase)
+                {
                     return Ok(());
                 }
                 self.add_objective(h, a, 1)?;

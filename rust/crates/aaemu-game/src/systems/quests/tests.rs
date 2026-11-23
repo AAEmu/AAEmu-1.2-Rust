@@ -1420,6 +1420,8 @@ async fn let_it_done_with_only_an_auto_complete_reward_finishes_at_full_progress
         start(ctx, 4967);
         let interact = QuestEvent::Interaction {
             doodad_id: 5892,
+            wi_id: 19,
+            phase: 0,
             source_player_id: 1,
         };
         ctx.dispatch(&interact).unwrap();
@@ -1577,6 +1579,8 @@ async fn objective_acts_progress_on_their_events() {
         let inter = start(ctx, 4);
         ctx.dispatch(&QuestEvent::Interaction {
             doodad_id: 88,
+            wi_id: 1,
+            phase: 0,
             source_player_id: 1,
         })
         .unwrap();
@@ -1584,6 +1588,8 @@ async fn objective_acts_progress_on_their_events() {
         assert_eq!(ctx.st.quest(inter).unwrap().objectives[0], 1);
         ctx.dispatch(&QuestEvent::Interaction {
             doodad_id: 88,
+            wi_id: 1,
+            phase: 0,
             source_player_id: 1,
         })
         .unwrap();
@@ -6970,4 +6976,48 @@ async fn client_quest_requests_name_an_npc_within_reach() {
         .drain()
         .iter()
         .any(|(op, _)| *op == sc::SCQuestContextFailedPacket));
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_interaction_3742_requires_wi_19() {
+    assert_interaction_objective(3742, 522, [(0, 18, 0), (1, 19, 0)]).await;
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_interaction_991_requires_destination_phase_5522() {
+    assert_interaction_objective(991, 163, [(2590, 19, 5521), (2590, 19, 5522)]).await;
+}
+
+async fn assert_interaction_objective(
+    quest_id: u32,
+    detail_id: u32,
+    [wrong, right]: [(u32, i32, u32); 2],
+) {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let data = real_data(&conn);
+    let act = data
+        .act_template(detail_id, "QuestActObjInteraction")
+        .unwrap();
+    assert_eq!(act.quest_id, quest_id);
+    let (server, _) = server_with(|data| {
+        // Quest 3742 authors count zero. Give the selector an observable slot
+        // in the fixture while preserving the shipped count in the loader.
+        single_act_quest(data, quest_id, act.count.max(1), act.kind.clone());
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, quest_id);
+        for ((doodad_id, wi_id, phase), count) in [(wrong, 0), (right, 1)] {
+            ctx.dispatch(&QuestEvent::Interaction {
+                doodad_id,
+                wi_id,
+                phase,
+                source_player_id: 1,
+            })
+            .unwrap();
+            assert_eq!(ctx.st.quest(h).unwrap().objectives[0], count);
+        }
+    });
 }

@@ -913,6 +913,12 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         };
         args.source.always_hit = effect.always_hit;
         if paid_building(target, effect) {
+            let Some(EffectTemplate::Craft {
+                world_interaction, ..
+            }) = effect.template.and_then(|(kind, id)| data.effect(kind, id))
+            else {
+                unreachable!("paid building requires a craft effect");
+            };
             // This is the actual selected effect and target, rather than the router's
             // "handled" bool (which says nothing about whether construction succeeded).
             let p = player.as_ref().expect("paid building has a player");
@@ -930,11 +936,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             ) {
                 Ok(()) => {
                     let template_id = house.data().unit.template_id;
-                    crate::systems::quests::events::on_doodad_interaction(
+                    crate::systems::quests::events::on_world_interaction(
                         server,
                         p,
                         p,
                         template_id,
+                        *world_interaction as i32,
+                        0,
                     );
                 }
                 Err(error) => {

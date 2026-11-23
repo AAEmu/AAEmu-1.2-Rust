@@ -1082,9 +1082,14 @@ impl<'a> Run<'a> {
                 }
                 Delivered::Events(need)
             }
-            ActKind::ObjInteraction { doodad_id, .. } => {
+            ActKind::ObjInteraction {
+                doodad_id,
+                wi_id,
+                phase,
+                ..
+            } => {
                 for _ in 0..need {
-                    events::on_doodad_interaction(server, &pl, &pl, *doodad_id);
+                    events::on_world_interaction(server, &pl, &pl, *doodad_id, *wi_id, *phase);
                 }
                 Delivered::Events(need)
             }

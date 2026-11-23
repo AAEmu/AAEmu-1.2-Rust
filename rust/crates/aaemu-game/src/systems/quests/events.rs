@@ -67,6 +67,8 @@ pub enum QuestEvent {
     },
     Interaction {
         doodad_id: u32,
+        wi_id: i32,
+        phase: u32,
         source_player_id: u32,
     },
     ExpressFire {
@@ -812,13 +814,14 @@ pub fn on_items_acquired(server: &GameServer, player: &PlayerRef, template_id: u
     });
 }
 
-/// `DoDoodadInteractionEvents(sourcePlayer, targetPlayer, doodadTemplateId)`
-/// (`InteractionEffect`, `CraftEffect`).
-pub fn on_doodad_interaction(
+/// Quest credit for a world interaction (InteractionEffect, CraftEffect).
+pub fn on_world_interaction(
     server: &GameServer,
     source: &PlayerRef,
     target: &PlayerRef,
     doodad_template_id: u32,
+    wi_id: i32,
+    phase: u32,
 ) {
     let source_player_id = source.character_id;
     run_or_queue(server, target, move |ctx| {
@@ -826,6 +829,8 @@ pub fn on_doodad_interaction(
             ctx,
             &QuestEvent::Interaction {
                 doodad_id: doodad_template_id,
+                wi_id,
+                phase,
                 source_player_id,
             },
         );
