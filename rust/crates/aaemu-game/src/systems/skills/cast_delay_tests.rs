@@ -27,6 +27,7 @@ fn cast_data(cast_ms: i32) -> GameData {
     let mut t = (**d.systems.skills.skill(DAMAGE_SKILL).unwrap()).clone();
     t.id = CAST_SKILL;
     t.casting_time = cast_ms;
+    t.casting_delayable = true;
     d.systems.skills.add_skill(t);
     d
 }
@@ -366,4 +367,58 @@ async fn long_channel_keeps_its_server_duration_when_the_wire_value_saturates() 
     tokio::time::advance(Duration::from_millis(44_650)).await;
     tokio::task::yield_now().await;
     assert!(f.player.data().unit.skill_state.skill_task.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_disturb_leaves_a_non_delayable_cast_untouched() {
+    let mut d = cast_data(CAST_MS);
+    let mut t = (**d.systems.skills.skill(CAST_SKILL).unwrap()).clone();
+    t.casting_delayable = false;
+    d.systems.skills.add_skill(t);
+    let mut f = fixture_with(d);
+    let skill = start_timed_cast(&mut f);
+
+    let victim = WorldObject::from(&f.player);
+    let disturber = WorldObject::from(&f.npc);
+    special::execute(
+        &f.server,
+        5,
+        &disturb_args(&disturber, &victim, &SkillObject::None),
+        [100, 100, 0, 0], // compact special_effects 11220
+    );
+
+    assert!(
+        !f.client.drain_ops().contains(&sc::SCCastingDelayedPacket),
+        "a non-delayable cast must not announce a delay"
+    );
+    assert!(!skill.cancelled());
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(CAST_MS as u64)).await;
+    tokio::task::yield_now().await;
+    assert!(f.player.data().unit.skill_state.skill_task.is_none());
+    assert_eq!(f.npc.data().unit.hp, 400);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_delayed_channel_disturb_cannot_interrupt_the_successor() {
+    let mut f = fixture_with(channel_data(10_000));
+    let original = start_channel(&mut f);
+    let victim = WorldObject::from(&f.player);
+    let disturber = WorldObject::from(&f.npc);
+    special::execute(
+        &f.server,
+        5,
+        &disturb_args(&disturber, &victim, &SkillObject::None),
+        [100, DELAY_MS, 0, 0],
+    );
+    tokio::task::yield_now().await;
+
+    crate::systems::skills::skill::interrupt_skills(&f.server, &victim);
+    f.player.data().unit.skill_last_used_ms = 0;
+    let successor = start_channel(&mut f);
+    assert!(original.cancelled());
+    tokio::time::advance(Duration::from_millis(DELAY_MS as u64)).await;
+    tokio::task::yield_now().await;
+    assert!(!successor.cancelled());
+    assert!(f.player.data().unit.skill_state.skill_task.is_some());
 }

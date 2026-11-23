@@ -443,7 +443,7 @@ pub fn delay_cast(unit: &WorldObject, delay_ms: i64) -> Option<u16> {
     }
     unit.with_unit(|u| {
         let task = u.unit_mut().skill_state.skill_task.as_mut()?;
-        if task.kind != SkillTaskKind::Cast {
+        if task.kind != SkillTaskKind::Cast || !task.skill.template.casting_delayable {
             return None;
         }
         let run = task.skill.state();

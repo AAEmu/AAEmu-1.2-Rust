@@ -14,9 +14,9 @@ use super::super::super::packets_special::SCNotifyResurrectionPacket;
 use super::super::super::progress;
 use super::super::super::skill::{
     apply_skill_modifiers, delay_cast, level_and_inc, mana_level_scale, skips_level_mana,
-    start_auto_skill, use_triggered_skill,
+    start_auto_skill, stop, use_triggered_skill,
 };
-use super::super::super::state::{SkillRun, SkillTaskKind};
+use super::super::super::state::{SkillRun, SkillTaskKind, SkillTaskSlot};
 use super::super::super::stats::{stat, StatKind};
 use super::super::super::types::{BuffRemoveOn, SkillCastTarget};
 use super::super::{rand_int, EffectArgs};
@@ -124,32 +124,60 @@ pub fn disturb_casting(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) 
             }
             return;
         }
-        let (channeling, plotting) = target
+        let Some((channel, plot)) = target
             .with_unit(|u| {
-                let s = &u.unit().skill_state;
-                (
-                    s.skill_task
-                        .as_ref()
-                        .is_some_and(|t| matches!(t.kind, SkillTaskKind::EndChanneling { .. })),
-                    s.active_plot.is_some(),
-                )
-            })
-            .unwrap_or((false, false));
-        if channeling || plotting {
-            // Neither a channel nor a plot cast has a 1.2 delay packet, so how a delayed
-            // disturb affects them is capture-pending: keep the old delayed interrupt.
-            tracing::debug!(
-                "Special effects: DisturbCasting {} ms on a channel or plot cast (it cannot be delayed, capture-pending); interrupting after the delay",
-                v[1]
-            );
-            super::super::super::tasks::schedule(server, i64::from(v[1]), move |server| {
-                if super::super::super::geometry::is_live_object(&server, &target) {
-                    super::super::super::skill::interrupt_skills(&server, &target);
+                let state = &u.unit().skill_state;
+                if state
+                    .skill_task
+                    .as_ref()
+                    .is_some_and(|task| task.kind == SkillTaskKind::Cast)
+                {
+                    return None;
                 }
-            });
+                Some((state.skill_task.clone(), state.active_plot.clone()))
+            })
+            .flatten()
+        else {
+            // A non-delayable direct cast ignores positive pushback.
+            return;
+        };
+        if channel.is_none() && plot.is_none() {
+            return;
         }
-        // No cast, channel or plot: nothing to disturb (the old code armed an interrupt that
-        // could hit a cast started during the delay).
+
+        // Preserve the delayed interrupt of channels and plots while their pushback policy
+        // remains unverified. The task token and plot instance bind it to the original cast.
+        super::super::super::tasks::schedule(server, i64::from(v[1]), move |server| {
+            if !super::super::super::geometry::is_live_object(&server, &target) {
+                return;
+            }
+            let task = target
+                .with_unit(|u| {
+                    let state = &mut u.unit_mut().skill_state;
+                    if let Some(plot) = plot
+                        .as_ref()
+                        .filter(|plot| state.active_plot.as_ref() == Some(*plot))
+                    {
+                        plot.0.request_cancellation();
+                    }
+                    if channel.is_some() && state.skill_task == channel {
+                        let task = state.skill_task.take()?;
+                        task.cancel.cancel();
+                        Some(task)
+                    } else {
+                        None
+                    }
+                })
+                .flatten();
+            if let Some(SkillTaskSlot {
+                kind: SkillTaskKind::EndChanneling { channel_doodad },
+                skill,
+                ..
+            }) = task
+            {
+                stop(&server, &skill, &target, channel_doodad);
+            }
+        });
     } else {
         super::super::super::skill::interrupt_skills(server, &target);
     }
