@@ -2171,3 +2171,78 @@ async fn damage_pipeline_height_bonus_refreshed_dot_uses_the_latest_application(
         );
     }
 }
+
+#[tokio::test]
+async fn buff_removal_damage_provenance_distinguishes_attempts_from_damage() {
+    // Split the flags authored by 6816, 5867, 548 and 82 into single-flag
+    // probes so overlapping removal reasons cannot hide missing producers.
+    let spell = [101, 102, 103, 104];
+    let trigger = [105, 106, 107, 108];
+    for (is_tick, is_trigger, magic, miss, gone) in [
+        (false, false, false, false, &[][..]),
+        (true, false, true, false, &[101, 103][..]),
+        (true, false, false, false, &[102, 104][..]),
+        (false, true, false, false, &trigger[..]),
+        (false, true, false, true, &[105, 106][..]),
+    ] {
+        let mut data = fixture_data();
+        for (id, flag) in spell.into_iter().chain(trigger).zip(0..8) {
+            data.systems.skills.add_buff(skills::data::BuffTemplate {
+                id,
+                kind: 1,
+                remove_on_attack_spell_dot: flag == 0,
+                remove_on_attack_etc_dot: flag == 1,
+                remove_on_attacked_spell_dot: flag == 2,
+                remove_on_attacked_etc_dot: flag == 3,
+                remove_on_attack_buff_trigger: flag == 4,
+                remove_on_attacked_buff_trigger: flag == 5,
+                remove_on_damage_buff_trigger: flag == 6,
+                remove_on_damaged_buff_trigger: flag == 7,
+                ..Default::default()
+            });
+        }
+        let (server, _client, player, npc) = skills::cast_validation_tests::fixture(data);
+        let caster = WorldObject::from(&player);
+        let target = WorldObject::from(&npc);
+        let holders = [
+            &caster, &caster, &target, &target, &caster, &target, &caster, &target,
+        ];
+        let probes: Vec<_> = spell.into_iter().chain(trigger).zip(holders).collect();
+        for &(id, holder) in &probes {
+            buffs::add_buff_by_id(&server, holder, id, holder, 0);
+        }
+        let mut args = args(caster.clone(), target.clone(), 1);
+        if is_tick {
+            args.source = EffectSource::from_buff(Arc::new(skills::data::BuffTemplate::default()));
+        }
+        if is_tick || is_trigger {
+            args.cast = CastAction::Buff {
+                buff_id: 900,
+                owner_obj_id: target.obj_id(),
+                index: 1,
+            };
+        }
+        if miss {
+            args.source
+                .skill()
+                .unwrap()
+                .state()
+                .hit_types
+                .insert(target.obj_id(), SkillHitType::MeleeMiss);
+        }
+        let mut effect = skills::tests::damage_effect(1, 100);
+        effect.damage_type = if magic {
+            DamageType::Magic
+        } else {
+            DamageType::Melee
+        } as i32;
+        damage(&server, &effect, &args, None);
+        for (id, holder) in probes {
+            assert_eq!(
+                holder.with_base_unit(|u| u.buffs().check_buff(id)),
+                !gone.contains(&id),
+                "probe {id}, tick={is_tick}, trigger={is_trigger}, magic={magic}, miss={miss}"
+            );
+        }
+    }
+}

@@ -27,8 +27,8 @@ use super::super::relation::{can_attack, owner_character, relation_to};
 use super::super::state::AggroKind;
 use super::super::stats::{equip_slot, stat, stats, StatKind};
 use super::super::types::{
-    buff_constants, BuffEventTriggerKind, BuffRemoveOn, CastAction, DamageType, HealHitType,
-    HealType, KillReason, RelationState, SkillCaster, SkillHitType,
+    buff_constants, BuffEventTriggerKind, CastAction, DamageType, HealHitType, HealType,
+    KillReason, RelationState, SkillCaster, SkillHitType,
 };
 use super::super::{broadcast, send_to_players};
 use super::{chance_succeeds, rand_float, rand_int, EffectArgs, EffectSource};
@@ -448,8 +448,8 @@ pub(super) fn damage_with_aoe(
         args.source.skill().map(|skill| skill.template.id),
     );
     if !blocked_fish {
-        buffs::trigger_remove_on(server, &trg, BuffRemoveOn::AttackedEtc, 0);
-        buffs::trigger_remove_on(server, &caster, BuffRemoveOn::AttackEtc, 0);
+        buffs::remove_on_attack(server, &trg, args, damage_type, true);
+        buffs::remove_on_attack(server, &caster, args, damage_type, false);
     }
     if blocked_fish || buffs::check_damage_immune(server, &trg, damage_type) {
         let mut p = SCUnitDamagedPacket::new(
@@ -672,20 +672,12 @@ pub(super) fn damage_with_aoe(
     // divide it by duration/tick (sub_398CFFC0/sub_398D00C0). The scale is therefore
     // applied after the standalone fixed override below, exactly like HealEffect above
     // (HealEffect.cs: fixed -> * tick_modifier) and like the pre-bd90e0b73 C# order.
-    let mut tick_modifier = 1.0f32;
-    if let Some(b) = &args.source.buff {
-        if !b.tick_effects.is_empty() {
-            if b.duration != 0 && !args.source.buff_permanent {
-                tick_modifier = (b.tick / f64::from(b.duration)) as f32;
-            }
-            buffs::trigger_remove_on(server, &caster, BuffRemoveOn::DamageEtcDot, 0);
-            buffs::trigger_remove_on(server, &trg, BuffRemoveOn::DamagedEtcDot, 0);
-            if damage_type == Some(DamageType::Magic) {
-                buffs::trigger_remove_on(server, &caster, BuffRemoveOn::DamageSpellDot, 0);
-                buffs::trigger_remove_on(server, &trg, BuffRemoveOn::DamagedSpellDot, 0);
-            }
-        }
-    }
+    let tick_modifier = args
+        .source
+        .buff
+        .as_ref()
+        .filter(|b| !b.tick_effects.is_empty() && b.duration != 0 && !args.source.buff_permanent)
+        .map_or(1.0, |b| (b.tick / f64::from(b.duration)) as f32);
     if let Some(s) = skill {
         let per = |charges: i32, multiplier: f32| {
             charges as f32 * (multiplier + f32::from(s.level) * e.charged_level_mul)
@@ -973,7 +965,7 @@ pub(super) fn damage_with_aoe(
     buffs::fire_unit_event(server, trg.obj_id(), BuffEventTriggerKind::Attacked, value);
     if value > 0 {
         buffs::fire_unit_event(server, caster.obj_id(), BuffEventTriggerKind::Damage, value);
-        buffs::trigger_remove_on(server, &caster, BuffRemoveOn::DamageEtc, 0);
+        buffs::remove_on_damage(server, &caster, args, damage_type, false);
         buffs::fire_unit_event(server, trg.obj_id(), BuffEventTriggerKind::Damaged, value);
         let typed = match damage_type {
             Some(DamageType::Melee) => Some(BuffEventTriggerKind::DamagedMelee),
@@ -985,7 +977,7 @@ pub(super) fn damage_with_aoe(
         if let Some(k) = typed {
             buffs::fire_unit_event(server, trg.obj_id(), k, value);
         }
-        buffs::trigger_remove_on(server, &trg, BuffRemoveOn::DamagedEtc, 0);
+        buffs::remove_on_damage(server, &trg, args, damage_type, true);
     }
     if let Some(cp) = caster.as_player() {
         let mut target = durability_targets::ALL_WEAPONS;

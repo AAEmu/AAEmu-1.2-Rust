@@ -51,6 +51,7 @@ pub use self::removal::{
     remove_buffs_by_tag, remove_effect_by_skill, remove_effects_on_death, remove_stealth,
     take_resurrection_buff, trigger_remove_on, trigger_remove_on_keep_stealth,
 };
+pub(super) use self::removal::{remove_on_attack, remove_on_damage};
 pub use self::triggers::{fire_unit_event, TriggerSub};
 
 /// The full template of a buff (`SkillManager.GetBuffTemplate`); buffs created from a phase-2
