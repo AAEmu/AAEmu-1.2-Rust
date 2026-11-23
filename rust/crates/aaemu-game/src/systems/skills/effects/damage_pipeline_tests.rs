@@ -726,6 +726,93 @@ async fn damage_pipeline_npc_percent_attacks_select_pre_hit_player_hp() {
 }
 
 #[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+async fn real_compact_db_damage_fire_proc_gates_both_item_proc_families() {
+    use crate::data::items::ItemProcTemplate;
+    use crate::systems::economy::procs::chance_kind;
+    use skills::data::{BuffTemplate, EffectKind, EffectTemplate, SkillTemplate};
+
+    // Skill 22151 deals damage through global effect 30696 (descriptor 4818).
+    let Some(mut effect) = compact_damage(30696) else {
+        return;
+    };
+    assert_eq!(effect.id, 4818);
+    assert!(!effect.fire_proc);
+    assert!(effect.engage_combat);
+
+    const PROC_BUFF: u32 = 700;
+    const PROC_SKILL: u32 = 800;
+    let mut data = fixture_data();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: PROC_BUFF,
+        kind: 1,
+        duration: 60_000,
+        ..Default::default()
+    });
+    data.systems.skills.add_effect(
+        EffectKind::BuffEffect,
+        EffectTemplate::Buff(BuffEffect {
+            id: 1800,
+            buff_id: Some(PROC_BUFF),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        }),
+        0,
+    );
+    data.systems.skills.add_skill(SkillTemplate {
+        target_type: 0, // SelfTarget
+        effects: vec![skills::tests::skill_effect(
+            1800,
+            EffectKind::BuffEffect,
+            1800,
+        )],
+        ..skills::tests::skill_template(PROC_SKILL)
+    });
+    for (id, chance_kind) in [(7, chance_kind::HIT_ANY), (8, chance_kind::TAKE_DAMAGE_ANY)] {
+        data.items.item_procs.insert(
+            id,
+            ItemProcTemplate {
+                id,
+                skill_id: PROC_SKILL,
+                chance_kind,
+                chance_rate: 100,
+                ..Default::default()
+            },
+        );
+    }
+    let (server, _client, attacker, victim) = skills::cast_validation_tests::fixture(data);
+    {
+        let mut attacker = attacker.data();
+        attacker
+            .unit
+            .item_procs
+            .set_active(&server.game_data.items, [7]);
+    }
+    {
+        let mut victim = victim.data();
+        victim.unit.hp = 100_000;
+        victim.unit.max_hp = 100_000;
+        victim
+            .unit
+            .item_procs
+            .set_active(&server.game_data.items, [8]);
+    }
+    let args = args((&attacker).into(), (&victim).into(), 1);
+
+    damage(&server, &effect, &args, None);
+    assert!(victim.data().unit.hp < 100_000);
+    assert!(attacker.data().unit.is_in_battle);
+    assert!(!attacker.data().unit.buffs.check_buff(PROC_BUFF));
+    assert!(!victim.data().unit.buffs.check_buff(PROC_BUFF));
+
+    effect.fire_proc = true;
+    damage(&server, &effect, &args, None);
+    assert!(attacker.data().unit.buffs.check_buff(PROC_BUFF));
+    assert!(victim.data().unit.buffs.check_buff(PROC_BUFF));
+}
+
+#[tokio::test]
 async fn damage_pipeline_new_threat_saturates_and_legacy_zero_callers_are_unchanged() {
     let (server, _client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
     let target = WorldObject::from(&npc);
