@@ -533,6 +533,18 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         {
             false
         }
+        FuncTemplate::NaviRemoveTimer(f) => {
+            // Inferred from the 1.2 Navi doodads (1219: row 1, 600000 ms). The removal task
+            // belongs to this phase, so exiting cancels it and entry starts a fresh delay.
+            tasks::start_func_task(
+                server,
+                &ctx.doodad,
+                None,
+                FuncTaskKind::Delete,
+                tasks::ms(f64::from(f.after)),
+            );
+            false
+        }
         // Phase funcs whose C# `Use` only logs (and returns false).
         FuncTemplate::Animate(_)
         | FuncTemplate::BuyFishItem(_)
@@ -546,7 +558,6 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         | FuncTemplate::Exchange(_)
         | FuncTemplate::FishSchool(_)
         | FuncTemplate::HouseFarm(_)
-        | FuncTemplate::NaviRemoveTimer(_)
         | FuncTemplate::Parrot(_)
         | FuncTemplate::Sign(_)
         | FuncTemplate::WaterVolume(_) => {

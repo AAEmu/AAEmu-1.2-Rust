@@ -1508,6 +1508,34 @@ async fn audit_puzzle_roll_requires_its_item() {
 }
 
 #[tokio::test]
+async fn audit_navi_removal_only_fires_in_its_phase() {
+    let build = || {
+        Builder::default()
+            .template(TEMPLATE, &[(10, 1), (11, 2)])
+            .phase_func(
+                10,
+                FuncTemplate::NaviRemoveTimer(DoodadFuncNaviRemoveTimer {
+                    id: 1,
+                    after: 600_000,
+                }),
+            )
+    };
+    let mut f = fx(build());
+    let doodad = f.doodad(TEMPLATE);
+    assert_eq!(f.advance(599_999), 0);
+    assert!(!doodad.data().phase.deleted);
+    assert_eq!(f.advance(1), 1);
+    assert!(doodad.data().phase.deleted);
+
+    let mut f = fx(build());
+    let doodad = f.doodad(TEMPLATE);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), doodad.clone());
+    do_change_phase(&ctx, None, 11);
+    f.advance(600_000);
+    assert!(!doodad.data().phase.deleted);
+}
+
+#[tokio::test]
 async fn phase_change_cancels_pending_timer() {
     let b = Builder::default()
         .template(TEMPLATE, &[(10, 1), (11, 2)])
