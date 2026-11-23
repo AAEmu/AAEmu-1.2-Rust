@@ -5671,6 +5671,34 @@ async fn daily_quota_counts_active_and_completed_contexts_once() {
 }
 
 #[tokio::test]
+async fn restart_request_checks_total_supply_labor() {
+    let (server, _) = server_with(|d| {
+        timed_restart_quest(d, 95, true, 60_000);
+        d.add_component(component(959, 95, kind::SUPPLY));
+        d.add_act(959, 959, 959, 0, ActKind::SupplyLp { labor_power: 3 });
+        d.add_act(959, 960, 960, 0, ActKind::SupplyLp { labor_power: 5 });
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(95, false, acceptor::NPC, 500));
+        drain(ctx);
+        let h = active(ctx, 95);
+        ctx.sent.clear();
+        ctx.c.labor_power = 7;
+        assert!(!ctx.try_restart_quest(95));
+        assert_eq!(ctx.st.active_handle(95), Some(h));
+        assert_eq!(ctx.c.labor_power, 7);
+        assert_eq!(
+            ctx.sent,
+            vec![(sc::SCQuestContextFailedPacket, failed_bytes(95, 5))]
+        );
+        ctx.now_ms += 3_000;
+        ctx.c.labor_power = 8;
+        assert!(ctx.try_restart_quest(95));
+    });
+}
+
+#[tokio::test]
 async fn restart_request_is_throttled_per_character() {
     let (server, _) = server_with(|d| timed_restart_quest(d, 95, true, 60_000));
     let mut c = character();

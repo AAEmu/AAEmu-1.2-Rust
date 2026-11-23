@@ -415,7 +415,8 @@ impl<'a> Ctx<'a> {
     /// `CSRestartMainQuestPacket` (0x0fd): the player asked to restart a main quest. The 1.2
     /// client only sends it for an active quest whose status is not `Completed` and whose
     /// template `detail_id` is 2 (`FUN_3937b200` / `FUN_3937a8d0`), after its own 3 s
-    /// throttle. `restart_on_fail` is never read by the client; it is the inferred server gate
+    /// throttle. r208022 RVA 0x38a8d0 also totals supply labor before sending the request.
+    /// `restart_on_fail` is never read by the client; it is the inferred server gate
     /// (QUEST-1 in `PORTING.md`). The reply is a normal `SCQuestContextStartedPacket`, which
     /// the client turns into the `QUEST_CHAT_RESTART` bubble.
     pub fn try_restart_quest(&mut self, quest_id: u32) -> bool {
@@ -458,6 +459,22 @@ impl<'a> Ctx<'a> {
                 self.c.unit.name,
                 self.c.id
             );
+            return false;
+        }
+        let required_labor: i64 = template
+            .components_of(&self.data.components, kind::SUPPLY)
+            .into_iter()
+            .flat_map(|c| c.acts.iter())
+            .filter_map(|&a| match self.data.acts[a].kind {
+                ActKind::SupplyLp { labor_power } => Some(i64::from(labor_power)),
+                _ => None,
+            })
+            .sum();
+        if required_labor > 0 && i64::from(self.c.labor_power) < required_labor {
+            self.send(SCQuestContextFailedPacket {
+                quest_id,
+                err: quest_error::INSUFFICIENT_LABOR,
+            });
             return false;
         }
         let (acceptor_type, acceptor_id) = self
