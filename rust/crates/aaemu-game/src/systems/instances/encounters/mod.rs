@@ -20,6 +20,7 @@ mod plateau;
 mod red_dragon;
 pub mod registry;
 pub mod sharpwind;
+mod windscour;
 
 #[cfg(test)]
 mod tests;

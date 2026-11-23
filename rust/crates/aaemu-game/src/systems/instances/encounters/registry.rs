@@ -390,3 +390,8 @@ pub fn is_red_dragon_egg_skill(skill_id: u32) -> bool {
 pub fn is_tosare_portal_skill(skill_id: u32) -> bool {
     super::halcyona::is_tosare_portal_skill(skill_id)
 }
+
+/// Whether a cast uses the Combuster's Self-Destruct.
+pub fn is_combuster_self_destruct_skill(skill_id: u32) -> bool {
+    super::windscour::is_combuster_self_destruct_skill(skill_id)
+}

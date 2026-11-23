@@ -3041,7 +3041,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         // can leave it alive, so use the corpse-free removal authored for the same NPC
         // on Self-Destruct 15992. The explosion's damage and buff on nearby targets are
         // separate effects.
-        let combuster_self_destruct = t.id == 16_444
+        let combuster_self_destruct = encounters::is_combuster_self_destruct_skill(t.id)
             && kind == EffectKind::DamageEffect
             && id == 2729
             && target.obj_id() == caster.obj_id()
