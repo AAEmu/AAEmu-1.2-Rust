@@ -427,9 +427,59 @@ async fn a_delayed_channel_disturb_cannot_interrupt_the_successor() {
     assert!(f.player.data().unit.skill_state.skill_task.is_some());
 }
 
+/// The client's stop for the direct timeline. It has already cleared its own cast bar when this
+/// arrives (r208022 0x3a66d0 / 0x3a67c0 send 0x054 and then end the local timeline without
+/// reading `casting_cancelable` / `channeling_cancelable`).
+async fn send_stop(f: &mut Fixture, skill: &SkillRef) {
+    CSStopCastingPacket {
+        tl_id: skill.tl_id(),
+        plot_tl_id: 0,
+        obj_id: PLAYER_OBJ,
+    }
+    .handle(&f.server, &mut f.client.conn)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_player_stop_ends_a_cast_whose_data_is_not_cancelable() {
+    // Moving during Meteor Strike, a craft or a mining cast: the 1.2 rows are not
+    // `casting_cancelable`, and the cast used to finish after the bar had gone.
+    let mut d = cast_data(CAST_MS);
+    let mut t = (**d.systems.skills.skill(CAST_SKILL).unwrap()).clone();
+    t.casting_cancelable = false;
+    d.systems.skills.add_skill(t);
+    let mut f = fixture_with(d);
+    let skill = start_timed_cast(&mut f);
+
+    send_stop(&mut f, &skill).await;
+    assert!(skill.cancelled());
+    assert!(f.player.data().unit.skill_state.skill_task.is_none());
+    assert!(f.client.drain_ops().contains(&sc::SCCastingStoppedPacket));
+
+    tokio::time::advance(Duration::from_millis((CAST_MS + 300) as u64)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        f.npc.data().unit.hp,
+        1000,
+        "the stopped cast still applied its effects"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_player_stop_ends_a_channel_whose_data_is_not_cancelable() {
+    let mut f = fixture_with(channel_data(10_000));
+    let skill = start_channel(&mut f);
+    assert!(!skill.template.channeling_cancelable);
+
+    send_stop(&mut f, &skill).await;
+    assert!(skill.cancelled());
+    assert!(f.player.data().unit.skill_state.skill_task.is_none());
+}
+
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
-async fn real_compact_cancel_permissions_apply_to_the_requested_stage() {
+async fn real_compact_player_stop_ends_the_direct_stage_whatever_the_cancel_flags() {
     let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
         return;
     };
@@ -442,7 +492,9 @@ async fn real_compact_cancel_permissions_apply_to_the_requested_stage() {
     )
     .unwrap();
 
-    for (id, cancelable) in [(10644, false), (13661, true), (11230, false), (10201, true)] {
+    // Flag set: 13661 (cast), 10201 (channel). Flag clear: 10644, 11230, Meteor Strike 15117,
+    // Mine Vein 10199, Craft Sunpoint Regrade Surprise 24740.
+    for id in [13661, 10201, 10644, 11230, 15117, 10199, 24740] {
         let authored = catalog.skill(id).unwrap();
         let mut d = cast_data(authored.casting_time);
         let mut t = (**d.systems.skills.skill(CAST_SKILL).unwrap()).clone();
@@ -454,37 +506,25 @@ async fn real_compact_cancel_permissions_apply_to_the_requested_stage() {
         let task = start_skill_task(&mut f);
         let skill = task.skill;
 
-        let stop = CSStopCastingPacket {
-            tl_id: skill.tl_id(),
-            plot_tl_id: 0,
+        // A plot request cannot select the direct slot even when the number matches.
+        CSStopCastingPacket {
+            tl_id: 0,
+            plot_tl_id: skill.tl_id(),
             obj_id: PLAYER_OBJ,
-        };
-        if cancelable {
-            // A plot request cannot select the direct slot even when the number matches.
-            CSStopCastingPacket {
-                tl_id: 0,
-                plot_tl_id: stop.tl_id,
-                ..stop
-            }
-            .handle(&f.server, &mut f.client.conn)
-            .await
-            .unwrap();
-            assert!(
-                !skill.cancelled(),
-                "plot timeline request stopped direct skill {id}"
-            );
         }
-        stop.handle(&f.server, &mut f.client.conn).await.unwrap();
-        assert_eq!(skill.cancelled(), cancelable, "skill {id}");
-        assert_eq!(
+        .handle(&f.server, &mut f.client.conn)
+        .await
+        .unwrap();
+        assert!(
+            !skill.cancelled(),
+            "plot timeline request stopped direct skill {id}"
+        );
+
+        send_stop(&mut f, &skill).await;
+        assert!(skill.cancelled(), "skill {id}");
+        assert!(
             f.client.drain_ops().contains(&sc::SCCastingStoppedPacket),
-            cancelable,
             "skill {id}"
         );
-        if !cancelable {
-            let victim = WorldObject::from(&f.player);
-            crate::systems::skills::skill::interrupt_skills(&f.server, &victim);
-            assert!(skill.cancelled(), "forced interruption of skill {id}");
-        }
     }
 }
