@@ -211,6 +211,16 @@ pub struct BotConfig {
     /// `busy`: seconds of the activity loop.
     #[serde(default = "default_busy_secs")]
     pub busy_secs: u64,
+    /// Optional fixed scene center for a local GM load test. Each bot uses a
+    /// deterministic offset within 25 m. The default retains the eight-point route.
+    #[serde(default)]
+    pub busy_center: Option<(f32, f32, f32)>,
+    /// Skip rowboat setup for the land-only crowd workload.
+    #[serde(default)]
+    pub busy_skip_boat: bool,
+    /// Character race override for newly created load-test characters.
+    #[serde(default)]
+    pub character_race: Option<u8>,
     /// `busy`: boat summon item (15817: Rowboat scroll, slave 15) and its use skill (15802).
     #[serde(default = "default_busy_boat_item")]
     pub busy_boat_item: u32,

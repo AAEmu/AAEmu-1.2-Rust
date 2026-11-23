@@ -434,10 +434,19 @@ impl GameClient {
         self.send_cs(cs::CSListCharacterPacket, s.as_bytes()).await
     }
 
-    /// `CSCreateCharacterPacket`: Nuian (1) male (1) Fighter (ability 1), default appearance.
+    /// `CSCreateCharacterPacket` for a Nuian male Fighter with default appearance.
     pub async fn create_character(&mut self, name: &str) -> anyhow::Result<()> {
+        self.create_character_with_race(name, 1).await
+    }
+
+    /// `CSCreateCharacterPacket` for a male Fighter of the selected race.
+    pub(crate) async fn create_character_with_race(
+        &mut self,
+        name: &str,
+        race: u8,
+    ) -> anyhow::Result<()> {
         let mut s = PacketStream::new();
-        s.write_str(name).write_u8(1).write_u8(1);
+        s.write_str(name).write_u8(race).write_u8(1);
         for _ in 0..7 {
             s.write_u32(0); // body items: template defaults
         }

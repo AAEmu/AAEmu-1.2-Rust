@@ -90,6 +90,11 @@ pub(super) async fn run(
     r: &mut Runner<'_>,
 ) -> anyhow::Result<()> {
     let idx = bot_index(&cfg.user);
+    if let Some((x, y, z)) = cfg.busy_center {
+        if ![x, y, z].into_iter().all(f32::is_finite) {
+            bail!("busy_center must contain finite coordinates");
+        }
+    }
 
     // ---- GM access ----
     let s = r.begin("game.busy.gm");
@@ -108,7 +113,7 @@ pub(super) async fn run(
     // ---- spread out ----
     let s = r.begin("game.busy.teleport");
     let point = (idx % POINTS.len() as u64) as usize;
-    let (px, py, pz) = POINTS[point];
+    let (px, py, pz) = cfg.busy_center.unwrap_or(POINTS[point]);
     let (x, y) = (
         px + offset(idx * 2 + 1, 25.0),
         py + offset(idx * 2 + 2, 25.0),
@@ -143,13 +148,15 @@ pub(super) async fn run(
     r.end(s, note);
 
     // ---- boat ----
-    let s = r.begin("game.busy.boat");
-    let note = match setup_boat(game, cfg).await {
-        Ok(note) => note,
-        Err(e) if game.state.disconnected => return Err(e),
-        Err(e) => format!("WARN no boat: {e:#}"),
-    };
-    r.end(s, note);
+    if !cfg.busy_skip_boat {
+        let s = r.begin("game.busy.boat");
+        let note = match setup_boat(game, cfg).await {
+            Ok(note) => note,
+            Err(e) if game.state.disconnected => return Err(e),
+            Err(e) => format!("WARN no boat: {e:#}"),
+        };
+        r.end(s, note);
+    }
 
     // ---- more things in the world ----
     let s = r.begin("game.busy.spawn");
@@ -181,6 +188,9 @@ pub(super) async fn run(
 
     // ---- activity loop ----
     let s = r.begin("game.busy.loop");
+    if cfg.busy_center.is_some() {
+        println!("busy ready {}", cfg.user);
+    }
     let counts = activity(game, cfg, idx).await?;
     let errors: Vec<String> = counts
         .errors
