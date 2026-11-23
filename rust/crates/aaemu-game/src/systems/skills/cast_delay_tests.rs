@@ -291,3 +291,79 @@ async fn a_delayed_disturb_interrupts_a_channel_after_the_delay() {
         "{got:x?}"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn long_fire_delay_uses_full_milliseconds_on_the_wire_and_in_the_scheduler() {
+    for (delay, expected) in [(40_000, [0xA0, 0x0F]), (90_000, [0x28, 0x23])] {
+        // 90,000 ms is the effect_delay authored for skill 16385.
+        let mut d = cast_data(0);
+        let mut t = (**d.systems.skills.skill(CAST_SKILL).unwrap()).clone();
+        t.effect_delay = delay;
+        d.systems.skills.add_skill(t);
+        let mut f = fixture_with(d);
+        start_skill(
+            &f.server,
+            &mut f.client.conn,
+            cast_packet(CAST_SKILL, SkillCastTarget::Unit(NPC_OBJ)),
+        );
+
+        let fired = frames(&mut f.client)
+            .into_iter()
+            .find(|(op, _)| *op == sc::SCSkillFiredPacket)
+            .expect("skill fired")
+            .1;
+        // Skill id, timeline, caster, target and skill object precede the two u16 times.
+        assert_eq!(fired[15..19], [expected[0], expected[1], 0, 0]);
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(delay as u64 - 10)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(f.npc.data().unit.hp, 1000);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(f.npc.data().unit.hp, 400);
+    }
+}
+
+#[tokio::test]
+async fn long_cast_start_times_saturate_at_the_unsigned_wire_limit() {
+    // Skill 11747 authors a 1,000,000 ms direct cast.
+    let mut f = fixture_with(cast_data(1_000_000));
+    start_skill(
+        &f.server,
+        &mut f.client.conn,
+        cast_packet(CAST_SKILL, SkillCastTarget::Unit(NPC_OBJ)),
+    );
+
+    let started = frames(&mut f.client)
+        .into_iter()
+        .find(|(op, _)| *op == sc::SCSkillStartedPacket)
+        .expect("skill started")
+        .1;
+    assert_eq!(started[15..19], [0xFF; 4]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn long_channel_keeps_its_server_duration_when_the_wire_value_saturates() {
+    let mut f = fixture_with(channel_data(700_000));
+    start_skill(
+        &f.server,
+        &mut f.client.conn,
+        cast_packet(CAST_SKILL, SkillCastTarget::Unit(NPC_OBJ)),
+    );
+
+    let fired = frames(&mut f.client)
+        .into_iter()
+        .find(|(op, _)| *op == sc::SCSkillFiredPacket)
+        .expect("channel fired")
+        .1;
+    assert_eq!(fired[15..19], [0, 0, 0xFF, 0xFF]);
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(655_350)).await;
+    tokio::task::yield_now().await;
+    assert!(f.player.data().unit.skill_state.skill_task.is_some());
+    tokio::time::advance(Duration::from_millis(44_650)).await;
+    tokio::task::yield_now().await;
+    assert!(f.player.data().unit.skill_state.skill_task.is_none());
+}

@@ -14,7 +14,7 @@ use self::cooldowns::{on_skill_cooldown, start_global_cooldown, start_skill_cool
 use self::targeting::initial_target;
 use super::data::{EffectTemplate, SkillTemplate};
 use super::geometry::{world_pos, PosUnit, Target};
-use super::packets::SCSkillStartedPacket;
+use super::packets::{wire_duration_div10, SCSkillStartedPacket};
 use super::state::{
     CancelToken, DirectCastEnd, PlotCooldownSnapshot, SkillRef, SkillRun, SkillTaskKind,
     SkillTaskSlot,
@@ -596,8 +596,8 @@ fn use_skill_impl(
             ctx.target_caster,
             ctx.skill_object.clone(),
         );
-        p.base_cast_time_div10 = (cast_time / 10) as u16;
-        p.real_cast_time_div10 = (cast_time / 10) as u16;
+        p.base_cast_time_div10 = wire_duration_div10(cast_time);
+        p.real_cast_time_div10 = p.base_cast_time_div10;
         broadcast(server, caster, &p, true);
         let cancel = CancelToken::new();
         caster.with_unit(|u| {

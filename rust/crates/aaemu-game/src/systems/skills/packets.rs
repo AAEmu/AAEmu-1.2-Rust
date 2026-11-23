@@ -113,6 +113,12 @@ impl Marshal for SCSkillStartedPacket {
     }
 }
 
+/// r208022 SkillStarted (0x7da290) and SkillFired (0x7da390) use the same
+/// unsigned, 10 ms duration codec at RVA 0x7c2160 as plot events.
+pub(super) fn wire_duration_div10(duration_ms: i32) -> u16 {
+    (duration_ms / 10).clamp(0, i32::from(u16::MAX)) as u16
+}
+
 /// `SCSkillFiredPacket`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SCSkillFiredPacket {
@@ -121,7 +127,7 @@ pub struct SCSkillFiredPacket {
     pub caster: SkillCaster,
     pub target: SkillCastTarget,
     pub skill_object: SkillObject,
-    pub computed_delay: i16,
+    pub computed_delay: i32,
     /// `Skill.Template.ChannelingTime`.
     pub channeling_time: i32,
     /// `FireAnimId` (default: the template's `FireAnim?.Id`).
@@ -138,8 +144,8 @@ impl Marshal for SCSkillFiredPacket {
         self.caster.write(s);
         self.target.write(s);
         self.skill_object.write(s);
-        s.write_i16((i32::from(self.computed_delay) / 10 + 10) as i16)
-            .write_i16((self.channeling_time / 10 + 10) as i16)
+        s.write_u16(wire_duration_div10(self.computed_delay))
+            .write_u16(wire_duration_div10(self.channeling_time))
             .write_u8(0) // f
             .write_u32(self.fire_anim_id)
             .write_u8(0); // flag
@@ -1177,8 +1183,8 @@ mod tests {
             .write_bc(0)
             .write_bc(0)
             .write_u8(0)
-            .write_i16(55)
-            .write_i16(210)
+            .write_u16(45)
+            .write_u16(200)
             .write_u8(0)
             .write_u32(87)
             .write_u8(0);

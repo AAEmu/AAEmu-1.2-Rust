@@ -290,13 +290,14 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     if t.effect_speed > 0.0 {
         let d = distance_to(server, &Target::Obj(caster.clone()), &ctx.target, false);
-        total_delay += (d / t.effect_speed * 1000.0) as i32;
+        total_delay = total_delay.saturating_add((d / t.effect_speed * 1000.0) as i32);
     }
     let fire_anim_id = fire_anim_for(t, super::plots::weapon_wield_kind(server, caster));
     if fire_anim_id != 0 && t.use_anim_time {
         if let Some(anim) = data.anims.get(fire_anim_id) {
             let mul = stat(server, caster, StatKind::GlobalCooldownMul) as f32;
-            total_delay += (anim.combat_sync_time as f32 * (mul / 100.0)) as i32;
+            total_delay =
+                total_delay.saturating_add((anim.combat_sync_time as f32 * (mul / 100.0)) as i32);
         }
     }
     // The cast slot is already cleared, and the interaction effect of a skill that holds a
@@ -320,7 +321,7 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         caster: ctx.caster_caster,
         target: ctx.target_caster,
         skill_object: ctx.skill_object.clone(),
-        computed_delay: total_delay as i16,
+        computed_delay: total_delay,
         channeling_time: t.channeling_time,
         fire_anim_id,
     };
