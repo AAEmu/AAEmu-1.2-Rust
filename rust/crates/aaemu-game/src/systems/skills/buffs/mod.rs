@@ -396,6 +396,14 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     let Some(b) = resume_started_buff(server, owner, b) else {
         return;
     };
+    // Exemption is a transition on applying the grant. The active grant can itself
+    // be marked remove_on_exempt, so only other instances receive this event.
+    if template.exempt {
+        removal::remove_on_exempt(server, owner, &b);
+        if resume_started_buff(server, owner, &b).is_none() {
+            return;
+        }
+    }
     if template.id > 0 {
         let skill_mods = data.skill_modifiers_by_owner(template.id).to_vec();
         let buff_mods = data.buff_modifiers_for_buff(template.id).to_vec();

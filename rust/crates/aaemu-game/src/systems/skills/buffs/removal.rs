@@ -395,6 +395,12 @@ pub(in crate::systems::skills) fn remove_on_source_death(
     }
 }
 
+pub(super) fn remove_on_exempt(server: &GameServer, owner: &WorldObject, grant: &Buff) {
+    trigger_remove_on_inner(server, owner, BuffRemoveOn::Exempt, 0, false, |b| {
+        b.instance_id != grant.instance_id
+    });
+}
+
 /// `Buffs.TriggerRemoveOn(on, value)`.
 pub fn trigger_remove_on(server: &GameServer, owner: &WorldObject, on: BuffRemoveOn, value: u32) {
     trigger_remove_on_inner(server, owner, on, value, false, |_| true)

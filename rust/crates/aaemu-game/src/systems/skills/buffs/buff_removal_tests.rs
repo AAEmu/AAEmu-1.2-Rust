@@ -473,3 +473,22 @@ async fn buff_removal_source_death_reaches_every_holder_and_preserves_other_sour
     assert!(distant.with_base_unit(|u| u.buffs().check_buff(59)));
     assert!(holder.with_base_unit(|u| u.buffs().check_buff(69)));
 }
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn buff_removal_exempt_grant_clears_matching_incumbents() {
+    let Some((_db, data)) = removal_compact_data() else {
+        return;
+    };
+    let (server, _client, player, _) = crate::systems::skills::cast_validation_tests::fixture(data);
+    let holder = WorldObject::from(&player);
+    for id in [40, 656, 432] {
+        super::add_buff_by_id(&server, &holder, id, &holder, 0);
+    }
+    assert!(!player.data().unit.buffs.check_buff(40));
+    assert!(player.data().unit.buffs.check_buff(656));
+    assert!(player.data().unit.buffs.check_buff(432));
+    // The grant 419 also has remove_on_exempt and must survive its own event.
+    super::add_buff_by_id(&server, &holder, 419, &holder, 0);
+    assert!(player.data().unit.buffs.check_buff(419));
+}
