@@ -135,7 +135,7 @@ pub trait SkillsBridge: Send + Sync {
     /// since spawn still fires. The spawner unit (`caster`) is its owner; the C# used it as the
     /// cast source, which refused moved gimmicks and doodad-spawned ones. **Inferred (no 1.2
     /// server evidence):** casting from the gimmick itself (retail's zone process is not
-    /// decompiled here). Default: nothing.
+    /// decompiled here). Returns whether the cast was accepted.
     fn use_gimmick_skill(
         &self,
         _server: &GameServer,
@@ -143,7 +143,8 @@ pub trait SkillsBridge: Send + Sync {
         _gimmick: &WorldObject,
         _skill_id: u32,
         _pos: (f32, f32, f32),
-    ) {
+    ) -> bool {
+        false
     }
 
     /// `GimmickTemplate.CollisionSkillId`: the gimmick touched `unit`. The 1.2 client has no
