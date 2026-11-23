@@ -23,6 +23,7 @@ use crate::world::{PlayerRef, WorldInstance};
 
 const TEMPLATE: u32 = 100;
 const FAKE_SKILL: u32 = 999;
+const HAZARD_OWNER_FACTION: u32 = 115;
 
 /// Synthetic `DoodadData` builder.
 #[derive(Default)]
@@ -177,6 +178,10 @@ impl Builder {
         let mut gd = GameData::empty();
         gd.systems.npcs.doodad = self.data;
         gd.systems.npcs.area_trigger.shapes.insert(shape.id, shape);
+        gd.factions.add(crate::data::world_data::SystemFaction {
+            id: HAZARD_OWNER_FACTION,
+            ..Default::default()
+        });
         gd.systems
             .skills
             .add_buff(crate::systems::skills::data::BuffTemplate {
@@ -2429,6 +2434,8 @@ fn spawn_owner_npc(server: &GameServer, world: &Arc<WorldInstance>) -> WorldObje
     );
     {
         let mut n = npc.data();
+        // Putrid Demon (11357), the caster of the real Poison Belch, has faction 115.
+        n.unit.faction_id = HAZARD_OWNER_FACTION;
         n.unit
             .transform
             .set_position(100.0, 100.0, 100.0, 0.0, 0.0, 0.0);
