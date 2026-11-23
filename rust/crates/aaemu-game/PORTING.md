@@ -407,20 +407,26 @@ and `battlefield_end_awards_bonus_honor` are the no-modifier regressions.
 #### Delayed `DisturbCasting` / `SCCastingDelayed` (2026-11-05)
 
 `systems::skills`: 1.2 packet `SCCastingDelayed` 0x0a6 (S->C, reader `FUN_397ca570`,
-`D:/aa-re/client12/out-x2game/x2game.dll.c`): `u16 skillId (0x40) ; u16 plotId (0x40) ; u32
-delay (0x3c)`. The client handler `FUN_391d5d70` calls `FUN_39395760(skillId, delay)` (adds the
-delay to the running cast of that skill id and rescales its animation) or
-`FUN_3938c520(plotId, delay)` (the same for a plot cast). Special effect 5 (`DisturbCasting`)
+`D:/aa-re/client12/out-x2game/x2game.dll.c`): `u16 tl (0x40) ; u16 plotTl (0x40) ; u32
+delay (0x3c)`. **Corrected 2026-11-23 (skill-audit cast #1):** both ids are *timeline* ids, not
+skill or plot template ids. The client handler (r208022 `0x1e5d70`) passes the first to
+`0x3a5760`, which looks up the active direct-cast timeline (the same lookup `OnSkillEnded` uses at
+`0x3a7ff0`) and extends its entry, and the second to `0x39c520`, which looks up the plot timeline.
+Zero leaves that timeline untouched. Special effect 5 (`DisturbCasting`)
 has `value1` chance % and `value2` delay ms: 22 of its 24 rows have delay 0; the delayed rows
 are 997 (10 %, 1000), 11220 (100 %, 100) and 14687 (100 %, 10). Joining `skill_effects ->
 effects.actual_id -> special_effects`, only skill 12390 Low Kick reaches a delayed row (skill
 effect 5134 -> effects 5134 -> special 997).
 
-Rule now implemented: `delay > 0` and the victim runs a direct `Cast` task -> the task's
+Rule now implemented: `delay > 0`, the victim runs a direct `Cast` task and its skill has
+`skills.casting_delayable` (2,981 delayable vs 3,896 non-delayable timed 1.2 skills; skill-audit
+cast #7) -> the task's
 pending wait (`SkillTaskSlot.extend_ms`) grows by the delay; the armed cast timer takes it
 under the slot lock and re-arms instead of completing, so the cast ends `delay` ms later.
-`SCCastingDelayed { skillId, 0, delay }` goes to the victim. `delay == 0` keeps the immediate
-interrupt. **Deviation from C#:** the C# `DisturbCasting` only cancelled the plot and never
+`SCCastingDelayed { tl, 0, delay }` (the cast's timeline) goes to the victim. A non-delayable cast
+keeps its original timer and gets no packet. `delay == 0` keeps the immediate interrupt. A
+scheduled channel or plot interrupt is bound to the task or plot instance it was aimed at, so it
+cannot hit a successor cast. **Deviation from C#:** the C# `DisturbCasting` only cancelled the plot and never
 sent `SCCastingDelayed`; the delayed interrupt this replaces was Rust-only
 (`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Effects/SpecialEffects/DisturbCasting.cs`).
 

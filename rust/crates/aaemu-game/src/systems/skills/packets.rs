@@ -113,6 +113,22 @@ impl Marshal for SCSkillStartedPacket {
     }
 }
 
+/// r208022 SkillStarted (0x7da290) and SkillFired (0x7da390) use the same
+/// unsigned, 10 ms duration codec at RVA 0x7c2160 as plot events.
+pub(super) fn wire_duration_div10(duration_ms: i32) -> u16 {
+    (duration_ms / 10).clamp(0, i32::from(u16::MAX)) as u16
+}
+
+/// The fired packet's delay and channel fields keep the server's long-standing 100 ms bias
+/// (`ms / 10 + 10`). The client codec has no bias of its own, and whether native servers
+/// added one is unverified, so this keeps the client timing unchanged and only stops the
+/// value from wrapping.
+fn wire_fired_duration_div10(duration_ms: i32) -> u16 {
+    (duration_ms / 10)
+        .saturating_add(10)
+        .clamp(0, i32::from(u16::MAX)) as u16
+}
+
 /// `SCSkillFiredPacket`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SCSkillFiredPacket {
@@ -121,7 +137,7 @@ pub struct SCSkillFiredPacket {
     pub caster: SkillCaster,
     pub target: SkillCastTarget,
     pub skill_object: SkillObject,
-    pub computed_delay: i16,
+    pub computed_delay: i32,
     /// `Skill.Template.ChannelingTime`.
     pub channeling_time: i32,
     /// `FireAnimId` (default: the template's `FireAnim?.Id`).
@@ -138,8 +154,8 @@ impl Marshal for SCSkillFiredPacket {
         self.caster.write(s);
         self.target.write(s);
         self.skill_object.write(s);
-        s.write_i16((i32::from(self.computed_delay) / 10 + 10) as i16)
-            .write_i16((self.channeling_time / 10 + 10) as i16)
+        s.write_u16(wire_fired_duration_div10(self.computed_delay))
+            .write_u16(wire_fired_duration_div10(self.channeling_time))
             .write_u8(0) // f
             .write_u32(self.fire_anim_id)
             .write_u8(0); // flag
@@ -196,15 +212,12 @@ impl Marshal for SCCastingStoppedPacket {
     }
 }
 
-/// `SCCastingDelayedPacket(skillId, plotId, delay)`.
-///
-/// 1.2 reader `FUN_397ca570`: `u16 skillId (0x40) ; u16 plotId (0x40) ; u32 delay (0x3c)`.
-/// The client adds `delay` ms to the end of the running cast of that skill id
-/// (`FUN_39395760`) or of that plot id (`FUN_3938c520`); a direct cast sends plot id 0.
+/// Extends the direct skill timeline or the plot timeline named in the packet.
+/// r208022 dispatches them to RVAs 0x3a5760 and 0x39c520; zero leaves that timeline absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCCastingDelayedPacket {
-    pub skill_id: u16,
-    pub plot_id: u16,
+    pub tl: u16,
+    pub plot_tl: u16,
     pub delay: u32,
 }
 packet_def!(
@@ -214,8 +227,8 @@ packet_def!(
 );
 impl Marshal for SCCastingDelayedPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u16(self.skill_id)
-            .write_u16(self.plot_id)
+        s.write_u16(self.tl)
+            .write_u16(self.plot_tl)
             .write_u32(self.delay);
     }
 }
@@ -1126,10 +1139,9 @@ mod tests {
 
     #[test]
     fn casting_delayed_layout() {
-        // 1.2 reader FUN_397ca570: u16 skillId (0x40), u16 plotId (0x40), u32 delay (0x3c).
         let direct = SCCastingDelayedPacket {
-            skill_id: 12_390,
-            plot_id: 0,
+            tl: 12_390,
+            plot_tl: 0,
             delay: 1_000,
         };
         assert_eq!(
@@ -1137,8 +1149,8 @@ mod tests {
             vec![0x66, 0x30, 0x00, 0x00, 0xE8, 0x03, 0x00, 0x00]
         );
         let plot = SCCastingDelayedPacket {
-            skill_id: 0,
-            plot_id: 77,
+            tl: 0,
+            plot_tl: 77,
             delay: 70_000,
         };
         assert_eq!(
@@ -1181,8 +1193,8 @@ mod tests {
             .write_bc(0)
             .write_bc(0)
             .write_u8(0)
-            .write_i16(55)
-            .write_i16(210)
+            .write_u16(55)
+            .write_u16(210)
             .write_u8(0)
             .write_u32(87)
             .write_u8(0);

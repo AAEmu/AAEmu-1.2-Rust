@@ -418,8 +418,7 @@ pub fn clear_assault_list(server: &GameServer, p: &PlayerRef) {
     }
 }
 
-/// `OnAbuserHealed`: every unit that has `healed` in its aggro table gains heal aggro from the
-/// healer.
+/// `OnAbuserHealed`: every unit already engaged with `healed` gains aggro from the healer.
 pub fn on_abuser_healed(
     server: &GameServer,
     healed: &WorldObject,
@@ -437,7 +436,12 @@ pub fn on_abuser_healed(
         .unwrap_or_default();
     for h in holders {
         if let Some(holder) = server.world.object(h) {
-            add_unit_aggro(server, &holder, AggroKind::Heal, healer, amount);
+            let engaged = holder
+                .with_unit(|u| u.unit().skill_state.has_engaged_aggro_on(healed.obj_id()))
+                .unwrap_or(false);
+            if engaged {
+                add_unit_aggro(server, &holder, AggroKind::Heal, healer, amount);
+            }
         }
     }
 }

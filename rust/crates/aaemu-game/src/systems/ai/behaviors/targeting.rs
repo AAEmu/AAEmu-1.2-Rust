@@ -31,7 +31,13 @@ pub(super) fn current_target(c: &AiCtx<'_>) -> Option<WorldObject> {
 /// `BaseCombatBehavior.UpdateTarget()`: the abuser with the most aggro becomes the target.
 pub(super) fn update_target(c: &mut AiCtx<'_>) -> bool {
     if npc::skill_controller_running(&c.obj) {
-        return current_target(c).is_some();
+        return current_target(c).is_some_and(|target| {
+            !c.npc
+                .data()
+                .unit
+                .skill_state
+                .has_pending_aggro_on(target.obj_id())
+        });
     }
     let mut abusers = sorted_abusers(c);
     if c.server.config.ai.pull_aggro_enabled {
@@ -101,6 +107,7 @@ fn sorted_entries(c: &AiCtx<'_>) -> Vec<(u32, i32, u64)> {
         .skill_state
         .aggro_table
         .iter()
+        .filter(|(_, entry)| !entry.combat_notice_pending)
         .map(|(k, a)| (*k, a.total(), a.taunt_time))
         .collect();
     entries.sort_by(|a, b| match (a.2, b.2) {

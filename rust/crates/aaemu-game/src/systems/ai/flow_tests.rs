@@ -594,6 +594,102 @@ async fn aggressive_npc_chases_hits_and_returns_home() {
         .contains(&NPC_OBJ));
 }
 
+fn hit_with_engage_flag(f: &Fixture, engage_combat: bool, aggro_multiplier: f32) {
+    use crate::systems::skills::effects::{combat::damage, EffectArgs, EffectSource};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+
+    let mut effect = damage_effect(1, HIT_DAMAGE);
+    effect.engage_combat = engage_combat;
+    effect.aggro_multiplier = aggro_multiplier;
+    let mut source = EffectSource::default();
+    source.always_hit = true;
+    let args = EffectArgs {
+        caster: Some((&f.player).into()),
+        caster_caster: SkillCaster::Unit(PLAYER_OBJ),
+        target: Target::Obj((&f.npc).into()),
+        target_caster: SkillCastTarget::Unit(NPC_OBJ),
+        cast: CastAction::Skill {
+            skill_id: 1,
+            tl_id: 0,
+        },
+        source,
+        skill_object: &SkillObject::None,
+    };
+    damage(&f.server, &effect, &args, None);
+}
+
+#[tokio::test]
+async fn silent_damage_does_not_engage_after_command_set_or_call_help() {
+    let f = fixture(103.0);
+    let helper = spawn_npc(
+        &f.server,
+        HELPER_OBJ,
+        HELPER_TEMPLATE,
+        95.0,
+        100.0,
+        AiKind::Default,
+    );
+    post(&f.server, HELPER_OBJ, |c| {
+        c.go_to_idle();
+        c.go_to_default_behavior();
+    });
+    post(&f.server, NPC_OBJ, |c| c.go_to_run_command_set());
+    hit_with_engage_flag(&f, false, 1.0);
+    assert_eq!(
+        f.npc.data().unit.skill_state.aggro_table[&PLAYER_OBJ].damage_aggro,
+        HIT_DAMAGE
+    );
+
+    post(&f.server, NPC_OBJ, |c| {
+        super::behaviors::tick(c, B::RunCommandSet, 100)
+    });
+    assert_eq!(behavior(&f.server, NPC_OBJ), Some(B::Idle));
+    assert!(!f.npc.data().unit.is_in_battle);
+    assert!(helper.data().unit.skill_state.aggro_table.is_empty());
+
+    // Healing the silent attacker cannot use the reverse aggro watch to start combat.
+    let attacker = WorldObject::from(&f.player);
+    crate::systems::skills::combat::on_abuser_healed(&f.server, &attacker, &attacker, 50);
+    assert!(!f.player.data().unit.is_in_battle);
+    assert_eq!(
+        f.npc.data().unit.skill_state.aggro_table[&PLAYER_OBJ].heal_aggro,
+        0
+    );
+
+    post(&f.server, NPC_OBJ, |c| c.go_to_default_behavior());
+    // An engaging hit with no additional threat can still activate the existing entry.
+    hit_with_engage_flag(&f, true, 0.0);
+    assert_eq!(behavior(&f.server, NPC_OBJ), Some(B::Attack));
+    post(&f.server, NPC_OBJ, |c| {
+        super::behaviors::tick(c, B::Attack, 100)
+    });
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+    assert_eq!(behavior(&f.server, HELPER_OBJ), Some(B::Attack));
+}
+
+/// Silent damage only withholds the fight that this damage would start. A sight-aggressive NPC
+/// still notices the attacker in its sight range exactly as it would without the hit: the
+/// silent entry must not hide the player from perception.
+#[tokio::test]
+async fn silent_damage_leaves_sight_perception_unchanged() {
+    let f = fixture(103.0);
+    f.npc.data().unit.transform.rot_z = FACE_PLUS_X;
+    hit_with_engage_flag(&f, false, 1.0);
+    assert!(f.npc.data().unit.skill_state.aggro_table[&PLAYER_OBJ].combat_notice_pending);
+    assert!(!f.npc.data().unit.is_in_battle);
+
+    post(&f.server, NPC_OBJ, |c| {
+        c.go_to_idle();
+        super::behaviors::check_alert(c, B::Idle);
+    });
+    assert_eq!(behavior(&f.server, NPC_OBJ), Some(B::Alert));
+    assert_eq!(
+        f.npc.data().unit.skill_state.aggro_table[&PLAYER_OBJ].damage_aggro,
+        HIT_DAMAGE
+    );
+}
+
 #[tokio::test]
 async fn passive_npc_fights_back_and_calls_for_help() {
     let server = server();

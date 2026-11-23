@@ -1026,10 +1026,11 @@ fn npc_spawner_spawn_effect(
         return;
     }
     let world_id = caster.transform().world_id;
-    let caster_template = caster.as_npc().map_or(0, |n| n.data().unit.template_id);
-    let encounter_add =
-        encounters::is_wave_spawn(caster_template, e.spawner_id, e.use_summoner_aggro_target);
-    let wave_target = encounter_add
+    let inherit_target = e.use_summoner_aggro_target
+        || caster.as_npc().is_some_and(|npc| {
+            encounters::forces_spawner_aggro(npc.data().unit.template_id, e.spawner_id)
+        });
+    let summoner_target = inherit_target
         .then(|| npc_aggro_target(server, &world, caster))
         .flatten();
     for spawner in spawners {
@@ -1051,23 +1052,27 @@ fn npc_spawner_spawn_effect(
         if let Some(s) = server.systems.npcs.spawns.npc_spawner_of(npc.obj_id) {
             s.set_respawn_time(0);
         }
-        if let Some(victim) = &wave_target {
-            // These encounter adds join an active fight even with a zero lifetime.
+        if let Some(victim) = &summoner_target {
             for summoned in &spawned {
                 crate::systems::ai::hooks::engage(server, summoned, victim);
             }
-        } else if e.use_summoner_aggro_target && e.life_time != 0.0 {
+        } else if e.use_summoner_aggro_target && caster.as_player().is_some() {
+            // A player summoner has no aggro table. The 16 item skills that reach this path
+            // (quest summons such as 21684 / 23291) aim the add at the player's NPC target, or
+            // else at the player, as before.
             let victim = match &args.target {
                 Target::Obj(o) if o.as_npc().is_some() => o,
                 _ => caster,
             };
-            crate::systems::skills::combat::add_unit_aggro(
-                server,
-                &WorldObject::from(&npc),
-                crate::systems::skills::state::AggroKind::Damage,
-                victim,
-                1,
-            );
+            for summoned in &spawned {
+                crate::systems::skills::combat::add_unit_aggro(
+                    server,
+                    &WorldObject::from(summoned),
+                    crate::systems::skills::state::AggroKind::Damage,
+                    victim,
+                    1,
+                );
+            }
         }
         if e.life_time > 0.0 {
             super::npc::spawner::schedule_npc_do_despawn(server, &npc, e.life_time);

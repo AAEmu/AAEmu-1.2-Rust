@@ -586,42 +586,31 @@ fn summon_boss() {
 }
 
 #[test]
-fn is_wave_spawn() {
-    // Hieronimus: his portal spawners, only with the summoner's aggro target.
-    for spawner in [46629, 46640, 46656] {
-        assert!(r::is_wave_spawn(8962, spawner, true), "spawner {spawner}");
-        assert!(!r::is_wave_spawn(8962, spawner, false), "spawner {spawner}");
-    }
-    for spawner in [0, 46628, 46657] {
-        assert!(!r::is_wave_spawn(8962, spawner, true), "spawner {spawner}");
-    }
-    // Viboros: any spawner with the summoner's aggro target.
-    for caster in [11265, 12762] {
-        assert!(r::is_wave_spawn(caster, 0, true));
-        assert!(r::is_wave_spawn(caster, 46629, true));
-        assert!(!r::is_wave_spawn(caster, 0, false));
-    }
-    // Calleil: listed spawners, whatever the flag.
+fn forces_spawner_aggro() {
     for spawner in [102334, 102337, 102340, 102341, 102342] {
-        assert!(r::is_wave_spawn(11201, spawner, false), "spawner {spawner}");
-        assert!(r::is_wave_spawn(11201, spawner, true), "spawner {spawner}");
+        assert!(r::forces_spawner_aggro(11201, spawner), "spawner {spawner}");
     }
     for spawner in [0, 102333, 102335, 102336, 102338, 102339, 102343, 110540] {
-        assert!(!r::is_wave_spawn(11201, spawner, true), "spawner {spawner}");
+        assert!(
+            !r::forces_spawner_aggro(11201, spawner),
+            "spawner {spawner}"
+        );
     }
     for spawner in [110540, 110541, 110544, 110545, 110548] {
-        assert!(r::is_wave_spawn(12759, spawner, false), "spawner {spawner}");
+        assert!(r::forces_spawner_aggro(12759, spawner), "spawner {spawner}");
     }
     for spawner in [0, 110539, 110542, 110543, 110546, 110547, 110549, 102334] {
-        assert!(!r::is_wave_spawn(12759, spawner, true), "spawner {spawner}");
+        assert!(
+            !r::forces_spawner_aggro(12759, spawner),
+            "spawner {spawner}"
+        );
     }
     // Other casters.
     for caster in [
         0, 8961, 8963, 11264, 11266, 11200, 11202, 12758, 12760, 12761, 12763,
     ] {
-        assert!(!r::is_wave_spawn(caster, 46629, true), "caster {caster}");
-        assert!(!r::is_wave_spawn(caster, 102334, true), "caster {caster}");
-        assert!(!r::is_wave_spawn(caster, 110540, true), "caster {caster}");
+        assert!(!r::forces_spawner_aggro(caster, 102334), "caster {caster}");
+        assert!(!r::forces_spawner_aggro(caster, 110540), "caster {caster}");
     }
 }
 

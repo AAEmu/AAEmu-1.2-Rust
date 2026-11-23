@@ -1085,6 +1085,109 @@ async fn fake_and_event_spawners() {
     assert!(m.remove_npc_event_spawners(9));
 }
 
+/// Applies a zero-lifetime `NpcSpawnerSpawnEffect` for spawner 20 with `caster` as the
+/// summoner and returns the newly spawned NPC.
+fn spawn_inheriting_add(
+    server: &Arc<GameServer>,
+    caster: &WorldObject,
+    use_summoner_aggro_target: bool,
+) -> crate::world::NpcRef {
+    use crate::systems::npcs::bridges::NpcSkills;
+    use crate::systems::skills::data::effects::NpcSpawnerSpawnEffect;
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::ext::NpcSkillHooks;
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+
+    let m = manager(server);
+    let mut def = npc_def(600, 20.0, 20.0);
+    def.npc_spawner_ids = vec![20];
+    assert!(m.add_npc_spawner(server, def).is_ok());
+    crate::systems::npcs::install_hooks(server);
+    let template = EffectTemplate::NpcSpawnerSpawn(NpcSpawnerSpawnEffect {
+        id: 1,
+        spawner_id: 20,
+        life_time: 0.0,
+        despawn_on_creator_death: false,
+        use_summoner_aggro_target,
+        activation_state: false,
+    });
+    let args = EffectArgs {
+        caster: Some(caster.clone()),
+        caster_caster: SkillCaster::Unit(caster.obj_id()),
+        target: Target::Obj(caster.clone()),
+        target_caster: SkillCastTarget::Unit(caster.obj_id()),
+        cast: CastAction::Skill {
+            skill_id: 1,
+            tl_id: 0,
+        },
+        source: EffectSource::default(),
+        skill_object: &SkillObject::None,
+    };
+    assert!(NpcSkills.apply_effect(server, EffectKind::NpcSpawnerSpawnEffect, &template, &args));
+    let spawner = m.get_npc_spawner(20).remove(0);
+    let summon = spawner.spawned_npcs().values().next().unwrap()[0].clone();
+    summon
+}
+
+/// A zero-lifetime inheriting add of a player summoner aims at the player. Before inheritance
+/// was decoupled from `life_time`, a zero lifetime left the add without aggro.
+#[tokio::test]
+async fn npc_spawner_spawn_effect_zero_lifetime_add_of_a_player_targets_the_player() {
+    let server = server();
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Caster", 20.0, 20.0),
+        5000,
+    );
+    let add = spawn_inheriting_add(&server, &WorldObject::from(player.clone()), true);
+    assert!(add
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&player.obj_id));
+}
+
+/// Without `use_summoner_aggro_target` the add gets no aggro from its summoner.
+#[tokio::test]
+async fn npc_spawner_spawn_effect_without_inheritance_leaves_the_add_idle() {
+    let server = server();
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Caster", 20.0, 20.0),
+        5000,
+    );
+    let add = spawn_inheriting_add(&server, &WorldObject::from(player.clone()), false);
+    assert!(add.data().unit.skill_state.aggro_table.is_empty());
+}
+
+/// An NPC summoner with no aggro target leaves its inheriting add idle: the add never aggroes
+/// the summoner itself.
+#[tokio::test]
+async fn npc_spawner_spawn_effect_add_of_an_idle_npc_summoner_stays_idle() {
+    let server = server();
+    let m = manager(&server);
+    let mut def = npc_def(500, 25.0, 25.0);
+    def.npc_spawner_ids = vec![10];
+    assert!(m.add_npc_spawner(&server, def).is_ok());
+    let summoner = m
+        .get_npc_spawner(10)
+        .remove(0)
+        .force_spawn(&server, 0)
+        .expect("summoner NPC");
+    assert_eq!(summoner.data().current_aggro_target, 0);
+    let add = spawn_inheriting_add(&server, &WorldObject::from(&summoner), true);
+    let add = add.data();
+    assert!(add.unit.skill_state.aggro_table.is_empty());
+    assert!(!add.unit.is_in_battle);
+}
+
 #[tokio::test]
 async fn npc_spawner_spawn_effect_despawn_on_creator_death_removes_the_summon() {
     use crate::systems::npcs::bridges::NpcSkills;

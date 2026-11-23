@@ -561,10 +561,23 @@ async fn real_howling_normal_calleil_lightning_elemental_joins_the_fight() {
 #[tokio::test(start_paused = true)]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_howling_normal_calleil_fire_elementals_spawn_in_combat() {
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+
     let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
         return;
     };
     let (server, world) = load_normal(&db);
+    let Some(EffectTemplate::NpcSpawnerSpawn(effect)) = server
+        .game_data
+        .systems
+        .skills
+        .effect(EffectKind::NpcSpawnerSpawnEffect, 895)
+    else {
+        panic!("Calleil's spawner effect 895");
+    };
+    assert_eq!(effect.spawner_id, 102334);
+    assert!(!effect.use_summoner_aggro_target);
+
     let spawns = server.systems.npcs.spawns.get_or_create(&world);
     for spawner in [102334, 102340, 102342] {
         assert_eq!(

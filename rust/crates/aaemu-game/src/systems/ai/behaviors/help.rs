@@ -401,8 +401,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             .data()
             .unit
             .skill_state
-            .aggro_table
-            .contains_key(&abuser.obj_id());
+            .has_engaged_aggro_on(abuser.obj_id());
         // Some helpers have no in-combat event skill, so is_in_battle can remain false
         // while they chase. Repeated help calls must not restart that chase.
         if already_helping {
@@ -413,8 +412,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             .data()
             .unit
             .skill_state
-            .aggro_table
-            .contains_key(&abuser.obj_id())
+            .has_engaged_aggro_on(abuser.obj_id())
         {
             continue;
         }

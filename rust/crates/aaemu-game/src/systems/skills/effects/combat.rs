@@ -27,8 +27,8 @@ use super::super::relation::{can_attack, owner_character, relation_to};
 use super::super::state::AggroKind;
 use super::super::stats::{equip_slot, stat, stats, StatKind};
 use super::super::types::{
-    buff_constants, BuffEventTriggerKind, BuffRemoveOn, CastAction, DamageType, HealHitType,
-    HealType, KillReason, RelationState, SkillCaster, SkillHitType,
+    buff_constants, BuffEventTriggerKind, CastAction, DamageType, HealHitType, HealType,
+    KillReason, RelationState, SkillCaster, SkillHitType,
 };
 use super::super::{broadcast, send_to_players};
 use super::{chance_succeeds, rand_float, rand_int, EffectArgs, EffectSource};
@@ -448,8 +448,8 @@ pub(super) fn damage_with_aoe(
         args.source.skill().map(|skill| skill.template.id),
     );
     if !blocked_fish {
-        buffs::trigger_remove_on(server, &trg, BuffRemoveOn::AttackedEtc, 0);
-        buffs::trigger_remove_on(server, &caster, BuffRemoveOn::AttackEtc, 0);
+        buffs::remove_on_attack(server, &trg, args, damage_type, true);
+        buffs::remove_on_attack(server, &caster, args, damage_type, false);
     }
     if blocked_fish || buffs::check_damage_immune(server, &trg, damage_type) {
         let mut p = SCUnitDamagedPacket::new(
@@ -672,20 +672,12 @@ pub(super) fn damage_with_aoe(
     // divide it by duration/tick (sub_398CFFC0/sub_398D00C0). The scale is therefore
     // applied after the standalone fixed override below, exactly like HealEffect above
     // (HealEffect.cs: fixed -> * tick_modifier) and like the pre-bd90e0b73 C# order.
-    let mut tick_modifier = 1.0f32;
-    if let Some(b) = &args.source.buff {
-        if !b.tick_effects.is_empty() {
-            if b.duration != 0 && !args.source.buff_permanent {
-                tick_modifier = (b.tick / f64::from(b.duration)) as f32;
-            }
-            buffs::trigger_remove_on(server, &caster, BuffRemoveOn::DamageEtcDot, 0);
-            buffs::trigger_remove_on(server, &trg, BuffRemoveOn::DamagedEtcDot, 0);
-            if damage_type == Some(DamageType::Magic) {
-                buffs::trigger_remove_on(server, &caster, BuffRemoveOn::DamageSpellDot, 0);
-                buffs::trigger_remove_on(server, &trg, BuffRemoveOn::DamagedSpellDot, 0);
-            }
-        }
-    }
+    let tick_modifier = args
+        .source
+        .buff
+        .as_ref()
+        .filter(|b| !b.tick_effects.is_empty() && b.duration != 0 && !args.source.buff_permanent)
+        .map_or(1.0, |b| (b.tick / f64::from(b.duration)) as f32);
     if let Some(s) = skill {
         let per = |charges: i32, multiplier: f32| {
             charges as f32 * (multiplier + f32::from(s.level) * e.charged_level_mul)
@@ -901,7 +893,7 @@ pub(super) fn damage_with_aoe(
     }
     let now = now_ms();
     let trg_alive = trg.with_unit(|u| u.unit().hp > 0).unwrap_or(false);
-    if trg_alive {
+    if e.engage_combat && trg_alive {
         unit_combat::mark_combat_activity(&trg, now);
     }
     if let (Some(tp), Some(_)) = (trg.as_player(), caster.as_player()) {
@@ -912,12 +904,16 @@ pub(super) fn damage_with_aoe(
             None => hp.push((caster.obj_id(), now)),
         }
     }
-    if trg_alive || caster.with_unit(|u| u.unit().is_in_battle).unwrap_or(false) {
+    if e.engage_combat
+        && (trg_alive || caster.with_unit(|u| u.unit().is_in_battle).unwrap_or(false))
+    {
         unit_combat::mark_combat_activity(&caster, now);
     }
     // Item procs of the hit (attacker kinds 1-8, victim kinds 9-16), before the combat buffs as
     // in `DamageEffect.Apply`; a proc skill's own damage is guarded by `procs::proc_casting`.
-    crate::systems::economy::procs::roll_damage(server, &caster, &trg, damage_type, hit_type);
+    if e.fire_proc {
+        crate::systems::economy::procs::roll_damage(server, &caster, &trg, damage_type, hit_type);
+    }
     trigger_combat_buffs(server, &caster, &caster, hit_type, false);
     trigger_combat_buffs(server, &trg, &caster, hit_type, false);
     let mut p = SCUnitDamagedPacket::new(
@@ -953,27 +949,38 @@ pub(super) fn damage_with_aoe(
         );
         // Npc.OnDamageReceived: aggro + AI (npc subsystem)
         let threat = ((value as f32 * e.aggro_multiplier) as i32).max(0);
-        unit_combat::add_damage_aggro(server, &trg, &caster, value, threat);
-        server
-            .systems
-            .skills
-            .ext
-            .npcs()
-            .npc_damage_received(server, n, &caster, value);
+        unit_combat::add_damage_aggro_with_combat(
+            server,
+            &trg,
+            &caster,
+            value,
+            threat,
+            e.engage_combat,
+        );
+        // The AI damage notification can transition directly into its attack behavior.
+        if e.engage_combat {
+            server
+                .systems
+                .skills
+                .ext
+                .npcs()
+                .npc_damage_received(server, n, &caster, value);
+        }
     }
     // 10.x aggro-link guard help (Z:823528-823950) runs on the victim's hostile-aggro event.
     // An NPC victim reaches it from its own AI (`update_aggro_help`); players, mates and slaves
     // have no victim AI, so the damage applies it here (the caller-side gate re-checks
     // `system_factions.guard_help` before scanning around the victim). Misses, immunity and
     // other no-damage paths returned above, and a zero hit never pulls a guard.
-    if trg.as_npc().is_none() && value > 0 {
+    // Pulling a guard through this path would start combat for the attacker.
+    if e.engage_combat && trg.as_npc().is_none() && value > 0 {
         crate::systems::ai::behaviors::update_guard_help(server, &trg, &caster);
     }
     buffs::fire_unit_event(server, caster.obj_id(), BuffEventTriggerKind::Attack, 0);
     buffs::fire_unit_event(server, trg.obj_id(), BuffEventTriggerKind::Attacked, value);
     if value > 0 {
         buffs::fire_unit_event(server, caster.obj_id(), BuffEventTriggerKind::Damage, value);
-        buffs::trigger_remove_on(server, &caster, BuffRemoveOn::DamageEtc, 0);
+        buffs::remove_on_damage(server, &caster, args, damage_type, false);
         buffs::fire_unit_event(server, trg.obj_id(), BuffEventTriggerKind::Damaged, value);
         let typed = match damage_type {
             Some(DamageType::Melee) => Some(BuffEventTriggerKind::DamagedMelee),
@@ -985,7 +992,7 @@ pub(super) fn damage_with_aoe(
         if let Some(k) = typed {
             buffs::fire_unit_event(server, trg.obj_id(), k, value);
         }
-        buffs::trigger_remove_on(server, &trg, BuffRemoveOn::DamagedEtc, 0);
+        buffs::remove_on_damage(server, &trg, args, damage_type, true);
     }
     if let Some(cp) = caster.as_player() {
         let mut target = durability_targets::ALL_WEAPONS;

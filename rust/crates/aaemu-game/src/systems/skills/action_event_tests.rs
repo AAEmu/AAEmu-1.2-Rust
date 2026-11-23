@@ -313,7 +313,7 @@ async fn aggro_reset_selects_components_and_copy_registers_watchers() {
             damage_aggro: 100,
             heal_aggro: 0,
             etc_aggro: 7,
-            taunt_time: 0,
+            ..Aggro::default()
         }
     );
     execute(&server, 104, &args(&source, &target), [0; 4]);
@@ -334,6 +334,42 @@ async fn aggro_reset_selects_components_and_copy_registers_watchers() {
     // Native copy is a no-op when the source table is empty.
     execute(&server, 104, &args(&source, &target), [0; 4]);
     assert!(!other.data().unit.skill_state.aggro_table.is_empty());
+}
+
+#[tokio::test]
+async fn copied_silent_threat_announces_combat_only_once() {
+    let (server, mut client, player, npc) = fixture(GameData::empty());
+    let player_obj = WorldObject::from(&player);
+    let source = WorldObject::from(&npc);
+    let mut n = Npc::new(2);
+    n.unit.hp = 1000;
+    n.unit.transform.set_xyz(105.0, 100.0, 100.0);
+    let other = Entity::new(0x300, n);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&other, &server.view_ctx());
+    let target = WorldObject::from(&other);
+    client.drain();
+    super::combat::add_damage_aggro_with_combat(&server, &source, &player_obj, 100, 100, false);
+    assert!(!client
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCCombatFirstHitPacket));
+
+    execute(&server, 104, &args(&source, &target), [0; 4]);
+    assert!(client
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCCombatFirstHitPacket));
+    assert_eq!(
+        other.data().unit.skill_state.aggro_table[&player.obj_id].damage_aggro,
+        100
+    );
+
+    super::combat::add_damage_aggro(&server, &target, &player_obj, 10, 10);
+    assert!(!client
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCCombatFirstHitPacket));
 }
 
 #[tokio::test]
