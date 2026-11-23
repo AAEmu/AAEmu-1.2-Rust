@@ -279,7 +279,7 @@ impl Doodad {
         } else {
             *world
         };
-        let (roll, pitch, yaw) = p.roll_pitch_yaw_shorts();
+        let (roll, pitch, yaw) = p.doodad_rotation_shorts();
         s.write_position(p.x, p.y, p.z)
             .write_i16(roll)
             .write_i16(pitch)
@@ -428,5 +428,41 @@ impl Doodad {
             .phase
             .final_after_ms
             .map(|after| self.phase_time_ms + i64::from(after));
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+
+    #[test]
+    fn doodad_creation_rotation_matches_client_bytes() {
+        let mut d = Doodad::new(1);
+        d.attach_point = 0;
+        for ((roll, pitch, yaw), expected) in [
+            ((0.0_f32, 0.0_f32, 0.0_f32), [0_i16, 0, 0]),
+            ((0.0, 0.0, 180.0), [0, 0, -32767]),
+            ((0.0, 0.0, -180.0), [0, 0, 32767]),
+            ((0.0, 0.0, 202.5), [0, 0, -32137]),
+            ((0.0, 0.0, 233.4), [0, 0, -29273]),
+            ((30.0, -20.0, 60.0), [9981, -584, 16860]),
+        ] {
+            let pos = PositionAndRotation::new(
+                0.0,
+                0.0,
+                0.0,
+                roll.to_radians(),
+                pitch.to_radians(),
+                yaw.to_radians(),
+            );
+            let mut packet = PacketStream::new();
+            d.write(1, &pos, 0, &mut packet);
+            let expected: Vec<_> = expected.into_iter().flat_map(i16::to_le_bytes).collect();
+            assert_eq!(
+                &packet.into_bytes()[23..29],
+                expected,
+                "{roll}, {pitch}, {yaw}"
+            );
+        }
     }
 }

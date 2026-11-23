@@ -137,6 +137,16 @@ impl PositionAndRotation {
         (f(q.x), f(q.y), f(q.z))
     }
 
+    /// r208022 doodad creation (0x84b8b0) uses 0x7be020 to pack a normalized
+    /// quaternion. The decoder reconstructs nonnegative W from the packed XYZ.
+    pub(crate) fn doodad_rotation_shorts(&self) -> (i16, i16, i16) {
+        let q = self.to_quaternion();
+        let norm = (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt();
+        let sign = if q.w < 0.0 { -1.0 } else { 1.0 };
+        let pack = |v: f32| (v / norm * sign * f32::from(i16::MAX) + 0.5).floor() as i16;
+        (pack(q.x), pack(q.y), pack(q.z))
+    }
+
     /// `ToRollPitchYawSBytes()` (`MathF.Round` = ties to even).
     pub fn roll_pitch_yaw_sbytes(&self) -> (i8, i8, i8) {
         let f = |v: f32| -> i8 { (v / TWO_PI / TO_SBYTE_DIVIDER).round_ties_even() as i8 };

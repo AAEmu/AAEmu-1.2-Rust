@@ -507,10 +507,9 @@ fn sc_quest_context_packets_bytes() {
     let p = SCQuestContextResetPacket {
         quest_id: 130,
         body: body8,
-        component_id: 2,
     };
     let mut s = PacketStream::new();
-    s.write_u32(130).write_raw(&body8).write_u32(2);
+    s.write_u32(130).write_raw(&body8);
     assert_eq!(body(&p), s.into_bytes());
     assert_eq!(p.opcode(), sc::SCQuestContextResetPacket);
 
@@ -3504,9 +3503,7 @@ async fn daily_reset_and_item_destroy() {
         let sent = std::mem::take(&mut ctx.sent);
         assert_eq!(sent.len(), 1);
         let mut s = PacketStream::new();
-        s.write_u32(130)
-            .write_raw(&[0x08, 0, 0, 0, 0, 0, 0, 0])
-            .write_u32(2); // 131 still set
+        s.write_u32(130).write_raw(&[0x08, 0, 0, 0, 0, 0, 0, 0]); // 131 still set
         assert_eq!(sent[0], (sc::SCQuestContextResetPacket, s.into_bytes()));
         // Destroying the supply item (DropWhenDestroy) of quest 100 drops it
         assert!(ctx.add_quest(100, false, acceptor::NPC, 500));
@@ -5962,6 +5959,83 @@ async fn restart_request_requires_restart_on_fail_and_main_detail() {
             let q = ctx.st.quest(h).unwrap();
             assert_eq!(q.objectives[0], 1, "a refused restart changes nothing");
         }
+    });
+}
+
+#[tokio::test]
+async fn daily_quota_counts_active_and_completed_contexts_once() {
+    let (server, _) = server_with(|d| {
+        for (id, detail_id) in [
+            (130, detail::DAILY),
+            (131, detail::DAILY_GROUP),
+            (132, detail::DAILY_HUNT),
+            (133, detail::DAILY_LIVELIHOOD),
+            (134, detail::MAIN),
+        ] {
+            d.add_template(QuestTemplate {
+                detail_id,
+                ..quest(id)
+            });
+            d.add_component(component(id * 10, id, kind::START));
+            d.add_act(id * 10, id * 10, id * 10, 0, ActKind::ConAutoComplete);
+            d.add_component(component(id * 10 + 1, id, kind::READY));
+            d.add_act(
+                id * 10 + 1,
+                id * 10 + 1,
+                id * 10 + 1,
+                0,
+                ActKind::ConReportJournal,
+            );
+        }
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(130, false, 0, 0));
+        ctx.set_completed_quest_flag(130, true);
+        ctx.set_completed_quest_flag(131, true);
+        ctx.set_completed_quest_flag(134, true);
+        assert!(ctx.start_refusal(132, false).is_none());
+        server.config.update(|config| config.quest.daily_limit = 3);
+        assert!(ctx.start_refusal(132, false).is_none());
+        assert!(ctx.add_quest(132, false, 0, 0));
+        ctx.sent.clear();
+        ctx.answer_start_refusals = true;
+        assert!(!ctx.add_quest(133, false, 0, 0));
+        assert_eq!(
+            ctx.sent,
+            vec![(sc::SCQuestContextFailedPacket, failed_bytes(133, 0x1f))]
+        );
+        assert!(ctx.start_refusal(133, true).is_none());
+        ctx.reset_daily_quests(false);
+        assert!(ctx.start_refusal(133, false).is_none());
+    });
+}
+
+#[tokio::test]
+async fn restart_request_checks_total_supply_labor() {
+    let (server, _) = server_with(|d| {
+        timed_restart_quest(d, 95, true, 60_000);
+        d.add_component(component(959, 95, kind::SUPPLY));
+        d.add_act(959, 959, 959, 0, ActKind::SupplyLp { labor_power: 3 });
+        d.add_act(959, 960, 960, 0, ActKind::SupplyLp { labor_power: 5 });
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(95, false, acceptor::NPC, 500));
+        drain(ctx);
+        let h = active(ctx, 95);
+        ctx.sent.clear();
+        ctx.c.labor_power = 7;
+        assert!(!ctx.try_restart_quest(95));
+        assert_eq!(ctx.st.active_handle(95), Some(h));
+        assert_eq!(ctx.c.labor_power, 7);
+        assert_eq!(
+            ctx.sent,
+            vec![(sc::SCQuestContextFailedPacket, failed_bytes(95, 5))]
+        );
+        ctx.now_ms += 3_000;
+        ctx.c.labor_power = 8;
+        assert!(ctx.try_restart_quest(95));
     });
 }
 

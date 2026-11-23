@@ -111,12 +111,12 @@ impl Marshal for SCQuestContextCompletedPacket {
     }
 }
 
-/// `SCQuestContextResetPacket(questId, body, componentId)`.
+/// r208022 codec 0x7c5e10 writes the quest ID and its completion bitmap.
+/// The client's reset handler derives the bitmap block from `quest_id >> 6`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCQuestContextResetPacket {
     pub quest_id: u32,
     pub body: [u8; 8],
-    pub component_id: u32,
 }
 packet_def!(
     SCQuestContextResetPacket,
@@ -125,9 +125,7 @@ packet_def!(
 );
 impl Marshal for SCQuestContextResetPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u32(self.quest_id)
-            .write_raw(&self.body)
-            .write_u32(self.component_id);
+        s.write_u32(self.quest_id).write_raw(&self.body);
     }
 }
 
@@ -143,6 +141,8 @@ impl Marshal for SCQuestContextResetPacket {
 pub mod quest_error {
     pub const ALREADY_HAVE: u8 = 1;
     pub const INVALID_QUEST: u8 = 2;
+    pub const INSUFFICIENT_LABOR: u8 = 5;
+    pub const DAILY_QUOTA: u8 = 0x1f;
     pub const INVALID_NPC_OR_QUEST: u8 = 7;
     pub const INVALID_QUEST_STATUS: u8 = 12;
     pub const INVALID_DOODAD: u8 = 19;
