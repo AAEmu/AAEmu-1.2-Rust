@@ -216,3 +216,16 @@ pub fn for_world(name: &str) -> &'static dyn Encounter {
 pub fn all() -> &'static [&'static dyn Encounter] {
     &ALL
 }
+
+/// The applicable encounter's readiness check for a skill.
+pub(crate) fn effects_ready(
+    server: &GameServer,
+    t: &SkillTemplate,
+    caster: &WorldObject,
+    target: &Target,
+) -> Result<(), (u8, u32)> {
+    all()
+        .iter()
+        .find_map(|encounter| encounter.effects_ready(server, t, caster, target))
+        .unwrap_or(Ok(()))
+}

@@ -2410,16 +2410,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let cradle_chest = t.id == super::validation::CRADLE_CHEST_SKILL;
     let _doodad_operation =
         (egg_cast || cradle_chest).then(|| server.systems.economy.operation_scope());
-    let ready = if egg_cast {
-        super::validation::check_red_dragon_egg(server, caster, target_self)
-    } else if let Some(ready) = encounter_hooks::all()
-        .iter()
-        .find_map(|encounter| encounter.effects_ready(server, &t, caster, target_self))
-    {
-        ready
-    } else {
-        Ok(())
-    };
+    let ready = encounter_hooks::effects_ready(server, &t, caster, target_self);
     if let Err((result, _)) = ready {
         if let Some(player) = player.as_ref().filter(|_| result == skill_result::BAG_FULL) {
             player.send(crate::packets::world::SCErrorMsgPacket::new(
