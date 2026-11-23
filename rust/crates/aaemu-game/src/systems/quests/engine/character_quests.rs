@@ -598,11 +598,7 @@ impl<'a> Ctx<'a> {
                         let body = block.body8();
                         tracing::info!("QuestReset by {}, reset {quest_id}", self.c.unit.name);
                         if send_if_changed {
-                            self.send(SCQuestContextResetPacket {
-                                quest_id,
-                                body,
-                                component_id: block_id,
-                            });
+                            self.send(SCQuestContextResetPacket { quest_id, body });
                         }
                     }
                 }

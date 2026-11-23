@@ -503,7 +503,6 @@ fn sc_quest_context_packets_bytes() {
     let p = SCQuestContextResetPacket {
         quest_id: 130,
         body: body8,
-        component_id: 2,
     };
     let mut s = PacketStream::new();
     s.write_u32(130).write_raw(&body8);
