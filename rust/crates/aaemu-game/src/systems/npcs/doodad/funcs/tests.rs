@@ -222,7 +222,6 @@ async fn to_next_phase_funcs_and_stubs() {
         FuncTemplate::Cutdowning(DoodadFuncCutdowning { id: 1 }),
         FuncTemplate::Harvest(DoodadFuncHarvest { id: 1 }),
         FuncTemplate::OpenFarmInfo(DoodadFuncOpenFarmInfo { id: 1, farm_id: 0 }),
-        FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll::default()),
     ] {
         fx.doodad.data().phase.to_next_phase = false;
         fx.run(t, 0, 0);
@@ -236,6 +235,12 @@ async fn to_next_phase_funcs_and_stubs() {
         FuncTemplate::StoreUi(DoodadFuncStoreUi::default()),
         FuncTemplate::EvidenceItemLoot(DoodadFuncEvidenceItemLoot::default()),
         FuncTemplate::TreeByProductsCollect(DoodadFuncTreeByProductsCollect::default()),
+        // Compact PuzzleRoll 2 requires one item 25116 before it can advance.
+        FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll {
+            id: 2,
+            item_id: 25116,
+            count: 1,
+        }),
         // phase funcs are not `DoodadFuncTemplate`s
         FuncTemplate::Timer(DoodadFuncTimer::default()),
     ] {
@@ -1280,4 +1285,73 @@ async fn loot_item_failure_with_room_keeps_the_invalid_item_error() {
             error_body(error_message::BAG_INVALID_ITEM)
         )]
     );
+}
+
+#[tokio::test]
+async fn quest_objective_doodad_report_descriptor_does_not_offer_inactive_quest() {
+    let mut fx = fixture(Rec::default());
+    fx.run(
+        FuncTemplate::Quest(DoodadFuncQuest {
+            id: 21,
+            quest_kind_id: 2,
+            quest_id: 61,
+        }),
+        0,
+        0,
+    );
+    assert!(fx.client.drain().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_loot_item_uses_exact_chance_and_inclusive_quantity() {
+    use rand::{
+        rngs::{mock::StepRng, StdRng},
+        SeedableRng,
+    };
+
+    let path = std::env::var("AAEMU_COMPACT_DB").expect("AAEMU_COMPACT_DB");
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let data = crate::systems::npcs::doodad::data::DoodadData::load_from(&conn).unwrap();
+    let Some(FuncTemplate::LootItem(authored)) = data.func_template(1017, "DoodadFuncLootItem")
+    else {
+        panic!("missing loot item 1017");
+    };
+    assert_eq!(data.func_group(3600).unwrap().almighty, 1855);
+    assert!(data
+        .funcs_for_group(3600)
+        .iter()
+        .any(|f| { f.func_id == 1017 && f.func_type == "DoodadFuncLootItem" }));
+    assert_eq!(authored.item_id, ITEM_COINS);
+    let f = fixture(Rec {
+        money_ok: true,
+        ..Rec::default()
+    });
+    let world = f.server.world.world(0).unwrap();
+    let ctx = DoodadCtx::new(&f.server, world, f.doodad.clone());
+    let caster = WorldObject::from(&f.player);
+
+    let mut seeded = StdRng::seed_from_u64(1017);
+    for _ in 0..128 {
+        items::loot_item_with_rng(authored, &ctx, Some(&caster), 0, -1, &mut seeded);
+    }
+    assert_eq!(f.rec.calls().len(), 128);
+    assert!(
+        f.rec
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("money 10 ")),
+        "authored quantity 10 is reachable"
+    );
+
+    let zero = DoodadFuncLootItem {
+        percent: 0,
+        ..authored.clone()
+    };
+    let before = f.rec.calls().len();
+    items::loot_item_with_rng(&zero, &ctx, Some(&caster), 0, -1, &mut StepRng::new(0, 0));
+    assert_eq!(f.rec.calls().len(), before);
+    assert!(f.doodad.data().phase.loot_missed);
 }

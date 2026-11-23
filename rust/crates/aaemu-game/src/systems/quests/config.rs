@@ -2,14 +2,29 @@
 
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct QuestConfig {
-    /// Scale the paid quest exp / copper like the 1.2 client's quest window
-    /// (`X2Quest.GetQuestContextRewardExp` / `...RewardCopper`): the `quest_supplies` fallback
-    /// by the quest degree factor, exp (act and fallback) by the quest-vs-player level-gap
-    /// factor. The original zone server's behaviour is INFERRED, not captured
-    /// (`porting-md#2`); `false` keeps today's unscaled payout.
+    /// Maximum active or completed daily quests per character. Zero disables the quota.
+    /// r208022 reads the world-specific quest_daily_limit at RVA 0x582b20.
+    #[serde(
+        rename = "dailylimit",
+        alias = "quest_daily_limit",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub daily_limit: usize,
+
+    /// Use the r208022 quest window's degree (0x7e5eb0 / 0x7e5dd0) and XP level-gap
+    /// (0x7e3810) factors for payouts. Set to false for unscaled base amounts.
     #[serde(rename = "rewardscaling", deserialize_with = "crate::config::lenient")]
     pub reward_scaling: bool,
+}
+
+impl Default for QuestConfig {
+    fn default() -> Self {
+        Self {
+            daily_limit: 0,
+            reward_scaling: true,
+        }
+    }
 }

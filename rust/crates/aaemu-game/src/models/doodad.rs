@@ -244,6 +244,17 @@ impl Doodad {
         0
     }
 
+    /// r208022 RVA 0x3b4810 uses a nonzero wire delay for scale animation. Inferred from
+    /// compact group 9439, which authors both a growth and a separate timer: send the
+    /// growth deadline when scale changes. One millisecond bypasses the client's fallback
+    /// to the full descriptor delay after the animation deadline has elapsed.
+    pub(crate) fn phase_wire_time_left(&self, now_ms: i64) -> u32 {
+        self.phase.growth_scale_end_ms.map_or_else(
+            || self.time_left(now_ms),
+            |end| end.saturating_sub(now_ms).clamp(1, i64::from(u32::MAX)) as u32,
+        )
+    }
+
     /// `hasLootItem` of `Write`: the phase is driven exclusively by loot / recover funcs.
     pub fn has_loot_item(&self) -> bool {
         !self.current_func_types.is_empty()
@@ -279,7 +290,7 @@ impl Doodad {
         } else {
             *world
         };
-        let (roll, pitch, yaw) = p.roll_pitch_yaw_shorts();
+        let (roll, pitch, yaw) = p.doodad_rotation_shorts();
         s.write_position(p.x, p.y, p.z)
             .write_i16(roll)
             .write_i16(pitch)
@@ -291,7 +302,7 @@ impl Doodad {
             .write_u64(self.ucc_id)
             .write_u32(self.item_template_id)
             .write_u32(self.type2)
-            .write_u32(self.time_left(now_ms))
+            .write_u32(self.phase_wire_time_left(now_ms))
             .write_i64(self.plant_time)
             .write_u32(self.quest_glow)
             .write_i32(0) // family
@@ -384,6 +395,8 @@ pub struct DoodadPhaseState {
     /// `FuncTask`: generation of the pending func timer (0 = none). A timer task only fires
     /// when the generation it was created with is still current (`FuncTask.Cancel` bumps it).
     pub func_task: u64,
+    /// Puzzle outcomes have their own delay, including phases with an independently timed clout.
+    pub(crate) puzzle_task: u64,
     /// `_deleted`.
     pub deleted: bool,
     /// `Despawn` (unix ms, 0 = MinValue) / `Respawn` (GameObject members).
@@ -392,6 +405,8 @@ pub struct DoodadPhaseState {
     /// `DoodadFuncFinal.After` of the first `Final { After > 0 }` phase func of the current
     /// phase (`TimeLeft` cache: `final_phase_end_ms = PhaseTime + After`).
     pub final_after_ms: Option<i32>,
+    /// End of the authored scale animation for the active group.
+    pub growth_scale_end_ms: Option<i64>,
     /// Set on a `DoodadFuncRatioRespawn` replacement until its entry phase has run: its
     /// `DoodadFuncTod` funcs must not take the `curTime >= Tod` catch-up (see
     /// `phase_funcs::use_phase_func`).
@@ -403,6 +418,12 @@ pub(crate) enum PendingDoodadLoot {
     Item {
         func_id: u32,
         count: i32,
+    },
+    Puzzle {
+        character_id: u32,
+        loot_pack_id: u32,
+        next_phase: i32,
+        roll: Vec<crate::systems::economy::loot::GeneratedLoot>,
     },
     Pack {
         func_id: u32,
@@ -416,6 +437,7 @@ impl PendingDoodadLoot {
         match self {
             Self::Item { func_id, .. } => func_type == "DoodadFuncLootItem" && *func_id == id,
             Self::Pack { func_id, .. } => func_type == "DoodadFuncLootPack" && *func_id == id,
+            Self::Puzzle { .. } => false,
         }
     }
 }
@@ -428,5 +450,41 @@ impl Doodad {
             .phase
             .final_after_ms
             .map(|after| self.phase_time_ms + i64::from(after));
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+
+    #[test]
+    fn doodad_creation_rotation_matches_client_bytes() {
+        let mut d = Doodad::new(1);
+        d.attach_point = 0;
+        for ((roll, pitch, yaw), expected) in [
+            ((0.0_f32, 0.0_f32, 0.0_f32), [0_i16, 0, 0]),
+            ((0.0, 0.0, 180.0), [0, 0, -32767]),
+            ((0.0, 0.0, -180.0), [0, 0, 32767]),
+            ((0.0, 0.0, 202.5), [0, 0, -32137]),
+            ((0.0, 0.0, 233.4), [0, 0, -29273]),
+            ((30.0, -20.0, 60.0), [9981, -584, 16860]),
+        ] {
+            let pos = PositionAndRotation::new(
+                0.0,
+                0.0,
+                0.0,
+                roll.to_radians(),
+                pitch.to_radians(),
+                yaw.to_radians(),
+            );
+            let mut packet = PacketStream::new();
+            d.write(1, &pos, 0, &mut packet);
+            let expected: Vec<_> = expected.into_iter().flat_map(i16::to_le_bytes).collect();
+            assert_eq!(
+                &packet.into_bytes()[23..29],
+                expected,
+                "{roll}, {pitch}, {yaw}"
+            );
+        }
     }
 }

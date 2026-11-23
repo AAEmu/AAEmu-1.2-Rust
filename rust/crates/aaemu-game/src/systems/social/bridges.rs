@@ -211,6 +211,7 @@ impl SocialHooks for GameSocialHooks {
                 related_ids: None,
                 family_id: 0,
                 respawn_doodad_template_id: 0,
+                initial_func_group_id: 0,
             },
             Some(instance_id),
         ));

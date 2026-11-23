@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rand::distributions::{Distribution, WeightedIndex};
 use rand::Rng;
 
 use super::phase::{self, doodad_has_matching_climate};
@@ -36,30 +37,111 @@ fn override_if_character(
     caster: Option<&WorldObject>,
     next_phase: i32,
 ) -> bool {
-    if DoodadCtx::as_player(caster).is_some() {
+    if ctx.phase_requester(caster).is_some() {
         ctx.doodad.data().phase.override_phase = next_phase;
         return true;
     }
     false
 }
 
-/// The `OverridePhaseTime` handling of `Timer` / `Growth`: returns the remaining delay.
-fn time_left_with_override(ctx: &DoodadCtx<'_>, delay: f64) -> f64 {
+fn effective_growth_delay(ctx: &DoodadCtx<'_>, delay: i32) -> f64 {
+    let delay = f64::from(delay) / ctx.server.systems.npcs.doodads.growth_rate();
+    if doodad_has_matching_climate(ctx) {
+        delay * f64::from(0.73f32)
+    } else {
+        delay
+    }
+}
+
+/// r208022 RVAs 0x3b4810 and 0x3b2930 read the scale endpoints locally and animate
+/// over the supplied delay. Compact groups may author a separate timer or Final.
+pub(super) fn refresh_growth_scale_deadline(ctx: &DoodadCtx<'_>) {
+    let (group, phase_time) = {
+        let d = ctx.doodad.data();
+        (
+            d.func_group_id,
+            if d.phase.override_phase_time_ms > 0 {
+                d.phase.override_phase_time_ms
+            } else {
+                d.phase_time_ms
+            },
+        )
+    };
+    let data = ctx.data();
+    let growth = data.phase_funcs(group).iter().find_map(|phase| {
+        match data.phase_func_template(phase.func_id, &phase.func_type) {
+            Some(FuncTemplate::Growth(f)) if f.start_scale != f.end_scale => Some(f),
+            _ => None,
+        }
+    });
+    let deadline =
+        growth.map(|f| phase_time.saturating_add(effective_growth_delay(ctx, f.delay) as i64));
+    ctx.doodad.data().phase.growth_scale_end_ms = deadline;
+}
+
+/// The persisted phase start plus the effective delay is the deadline. The runtime task
+/// waits at least one millisecond even when that deadline elapsed offline.
+fn phase_deadline(ctx: &DoodadCtx<'_>, delay: f64) -> (i64, f64) {
+    let now = now_ms();
     let mut d = ctx.doodad.data();
-    let mut time_left = delay;
+    let mut start = now;
     if d.phase.override_phase_time_ms > 0 {
-        // Reset the override
-        d.phase_time_ms = d.phase.override_phase_time_ms;
-        d.phase.override_phase_time_ms = 0;
+        start = std::mem::take(&mut d.phase.override_phase_time_ms);
+        d.phase_time_ms = start;
         d.update_final_phase_end();
-        let since_phase_start = (now_ms() - d.phase_time_ms) as f64;
-        time_left = delay - since_phase_start;
     }
-    if time_left < 1.0 {
-        time_left = 1.0;
+    let due = start.saturating_add(delay as i64);
+    let time_left = due.saturating_sub(now).max(1);
+    d.growth_time_ms = now.saturating_add(time_left);
+    (due, time_left as f64)
+}
+
+/// Puzzle inputs and outcomes are weighted within their phase. Compact groups 14852 and 14845
+/// author 85/10/5 and four equal weights respectively, so weights need not sum to 100.
+fn weighted_puzzle_row(rows: &[(u32, f32)]) -> Option<u32> {
+    let distribution = WeightedIndex::new(rows.iter().map(|row| row.1)).ok()?;
+    Some(rows[distribution.sample(&mut rand::thread_rng())].0)
+}
+
+pub(super) fn select_puzzle_input(ctx: &DoodadCtx<'_>, phase: &[DoodadPhaseFunc]) -> Option<u32> {
+    if !phase
+        .iter()
+        .any(|row| row.func_type == "DoodadFuncPuzzleIn")
+    {
+        return None;
     }
-    d.growth_time_ms = now_ms() + time_left as i64;
-    time_left
+    let rows: Vec<_> = phase
+        .iter()
+        .filter_map(
+            |row| match ctx.data().phase_func_template(row.func_id, &row.func_type) {
+                Some(FuncTemplate::PuzzleIn(input)) => Some((input.id, input.ratio)),
+                _ => None,
+            },
+        )
+        .collect();
+    weighted_puzzle_row(&rows)
+}
+
+pub(super) fn select_puzzle_outcome(ctx: &DoodadCtx<'_>, phase: &[DoodadPhaseFunc]) -> Option<u32> {
+    if !phase
+        .iter()
+        .any(|row| row.func_type == "DoodadFuncPuzzleOut")
+    {
+        return None;
+    }
+    let group = ctx.doodad.data().puzzle_group;
+    let rows: Vec<_> = phase
+        .iter()
+        .filter_map(
+            |row| match ctx.data().phase_func_template(row.func_id, &row.func_type) {
+                Some(FuncTemplate::PuzzleOut(outcome)) if outcome.group_id as i32 == group => {
+                    Some((outcome.id, outcome.ratio))
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    weighted_puzzle_row(&rows)
 }
 
 /// `DoodadPhaseFunc.Use(caster, owner)` → the template's `Use`. Returns `true` to stop the phase
@@ -73,13 +155,14 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                     "DoodadFuncTimer: Delay {}, NextPhase {}, KeepRequester {}, ShowTip {}, ShowEndTime {}, Tip {}",
                     f.delay, f.next_phase, f.keep_requester, f.show_tip, f.show_end_time, f.tip
                 );
-                let time_left = time_left_with_override(ctx, f64::from(f.delay));
+                let (_, time_left) = phase_deadline(ctx, f64::from(f.delay));
                 tasks::start_func_task(
                     server,
                     &ctx.doodad,
                     caster,
                     FuncTaskKind::Timer {
                         next_phase: f.next_phase,
+                        keep_requester: f.keep_requester && ctx.carries_phase_requester,
                     },
                     tasks::ms(time_left),
                 );
@@ -155,13 +238,9 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             true
         }
         FuncTemplate::Growth(f) => {
-            // C# `owner.Scale = StartScale / 1000f` writes BaseUnit.Scale, which the get-only
-            // Doodad.Scale override never reads: no visible effect (mirrored).
-            let mut custom_delay = f64::from(f.delay) / server.systems.npcs.doodads.growth_rate(); // decrease delay
-            if doodad_has_matching_climate(ctx) {
-                custom_delay *= f64::from(0.73f32);
-            }
-            let time_left = time_left_with_override(ctx, custom_delay);
+            // The r208022 client reads both scale endpoints from its 1.2 growth descriptor
+            // and animates them using the wire delay (RVAs 0x3b4810 and 0x3b2930).
+            let (due_ms, time_left) = phase_deadline(ctx, effective_growth_delay(ctx, f.delay));
             tracing::trace!(
                 "DoodadFuncGrowth: Delay {}, StartScale {}, EndScale {}, NextPhase {}",
                 f.delay,
@@ -175,7 +254,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                 caster,
                 FuncTaskKind::Growth {
                     next_phase: f.next_phase,
-                    end_scale: f.end_scale as f32 / 1000.0,
+                    due_ms,
                 },
                 tasks::ms(time_left),
             );
@@ -275,7 +354,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             }
             false
         }
-        FuncTemplate::RequireItem(f) => match DoodadCtx::as_player(caster) {
+        FuncTemplate::RequireItem(f) => match ctx.phase_requester(caster) {
             Some(p) => {
                 let count = server
                     .systems
@@ -288,7 +367,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             }
             None => true,
         },
-        FuncTemplate::RequireQuest(f) => match DoodadCtx::as_player(caster) {
+        FuncTemplate::RequireQuest(f) => match ctx.phase_requester(caster) {
             Some(p) => !server
                 .systems
                 .npcs
@@ -353,7 +432,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                 f.min_time,
                 f.max_time
             );
-            if let Some(p) = DoodadCtx::as_player(caster) {
+            if let Some(p) = ctx.phase_requester(caster) {
                 use_respawn(ctx, p);
             }
             false
@@ -367,7 +446,32 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         }
         FuncTemplate::CraftDirect(f) => override_if_character(ctx, caster, f.next_phase),
         FuncTemplate::Hunger(f) => override_if_character(ctx, caster, f.next_phase),
-        FuncTemplate::PuzzleOut(f) => override_if_character(ctx, caster, f.next_phase),
+        FuncTemplate::PuzzleIn(f) => {
+            // The r208022 phase handler at 0x3b6c60 passes this selector to model loading.
+            ctx.doodad.data().puzzle_group = f.group_id as i32;
+            false
+        }
+        FuncTemplate::PuzzleOut(f) => {
+            if ctx.phase_requester(caster).is_none() {
+                return false;
+            }
+            if !f.anim.is_empty() || f.projectile_id != 0 {
+                ctx.broadcast(&super::packets::SCDoodadPuzzleScenePacket {
+                    obj_id: ctx.doodad.obj_id,
+                    projectile_id: f.projectile_id,
+                    projectile_delay: f.projectile_delay.max(0) as u32,
+                    anim: f.anim.clone(),
+                });
+            }
+            if f.sound_id != 0 {
+                ctx.broadcast(&super::packets::SCDoodadSoundPacket {
+                    obj_id: ctx.doodad.obj_id,
+                    sound_id: f.sound_id,
+                });
+            }
+            tasks::start_puzzle_outcome(ctx, caster, f);
+            false
+        }
         // A wait, not an action: stay in this phase until period `siege_period_id` ends, then
         // move to `next_phase` (-1 = gone). The boundary is an external event, so the func is
         // passive when the phase is entered; `super::siege_phase` applies the change when the
@@ -428,7 +532,7 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         }
         FuncTemplate::Coffer(_) => {
             ctx.doodad.data().phase.to_next_phase = false;
-            if let Some(p) = DoodadCtx::as_player(caster) {
+            if let Some(p) = ctx.phase_requester(caster) {
                 let (is_coffer, opened_by) = {
                     let d = ctx.doodad.data();
                     (
@@ -458,6 +562,27 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         {
             false
         }
+        FuncTemplate::NaviRemoveTimer(f) => {
+            // Inferred from the 1.2 Navi doodads (1219: row 1, 600000 ms). The removal task
+            // belongs to this phase, so exiting cancels it and entry starts a fresh delay.
+            tasks::start_func_task(
+                server,
+                &ctx.doodad,
+                None,
+                FuncTaskKind::Delete,
+                tasks::ms(f64::from(f.after)),
+            );
+            false
+        }
+        FuncTemplate::WaterVolume(f) => {
+            let p = ctx.world.world_pos_rot(&ctx.obj());
+            crate::systems::ai::physics::world_water(server, &ctx.world).shift_phase_surface(
+                crate::systems::skills::controllers::Vec3::new(p.x, p.y, p.z),
+                f.level_change,
+                f.duration,
+            );
+            false
+        }
         // Phase funcs whose C# `Use` only logs (and returns false).
         FuncTemplate::Animate(_)
         | FuncTemplate::BuyFishItem(_)
@@ -471,11 +596,8 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         | FuncTemplate::Exchange(_)
         | FuncTemplate::FishSchool(_)
         | FuncTemplate::HouseFarm(_)
-        | FuncTemplate::NaviRemoveTimer(_)
         | FuncTemplate::Parrot(_)
-        | FuncTemplate::PuzzleIn(_)
-        | FuncTemplate::Sign(_)
-        | FuncTemplate::WaterVolume(_) => {
+        | FuncTemplate::Sign(_) => {
             tracing::trace!("{}", t.func_type());
             false
         }
@@ -526,6 +648,7 @@ fn use_respawn(ctx: &DoodadCtx<'_>, player: &crate::world::PlayerRef) {
         related_ids: None,
         family_id: 0,
         respawn_doodad_template_id: 0,
+        initial_func_group_id: 0,
     };
     let spawner = Arc::new(DoodadSpawner::new(def, Some(ctx.world.id)));
     spawner.spawn(server, 0);

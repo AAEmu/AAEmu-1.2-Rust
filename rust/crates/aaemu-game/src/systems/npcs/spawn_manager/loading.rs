@@ -597,7 +597,7 @@ impl SpawnManager {
 
     fn load_doodad_spawns(
         &self,
-        _server: &GameServer,
+        server: &GameServer,
         world_path: &Path,
         exists: &TemplateExists<'_>,
         stats: &mut LoadStats,
@@ -634,6 +634,21 @@ impl SpawnManager {
                     );
                     stats.doodad_missing_templates += 1;
                     continue;
+                }
+                let data = &server.game_data.systems.npcs.doodad;
+                if def.initial_func_group_id != 0
+                    && !data
+                        .func_group(def.initial_func_group_id)
+                        .is_some_and(|group| group.almighty == def.base.unit_id)
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        entry = entry + 1,
+                        template_id = def.base.unit_id,
+                        func_group_id = def.initial_func_group_id,
+                        "Invalid doodad placement phase. Using the template's start group"
+                    );
+                    def.initial_func_group_id = 0;
                 }
                 let mut inner = self.inner();
                 def.base.id = inner.next_id;

@@ -289,7 +289,7 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
     if eligible.is_empty() {
         if let Some(ck) = &killer_player {
             if let Some(q) = &quests {
-                q.on_npc_killed(server, ck, npc);
+                q.on_npc_killed_by(server, ck, npc, killer);
                 q.add_exp(server, ck, kill_exp, npc.obj_id);
             }
             report_kill(server, ck, npc);
@@ -320,7 +320,7 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
                 crate::systems::vehicles::mates::reward_kill_exp(server, pl, mate_exp);
             }
             if let Some(q) = &quests {
-                q.on_npc_killed(server, pl, npc);
+                q.on_npc_killed_by(server, pl, npc, killer);
             }
             report_kill(server, pl, npc);
         }
@@ -329,7 +329,7 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
     // Tag Share: quest progress for the contributors after both branches above.
     for contributor in &tag_share_extra {
         if let Some(q) = &quests {
-            q.on_npc_killed(server, contributor, npc);
+            q.on_npc_killed_by(server, contributor, npc, killer);
         }
         report_kill(server, contributor, npc);
     }

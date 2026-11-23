@@ -192,9 +192,18 @@ pub fn use_func(
             }
             set_to_next_phase(ctx, true);
         }
-        F::PuzzleRoll(_) => {
-            tracing::trace!("DoodadFuncPuzzleRoll");
-            set_to_next_phase(ctx, true);
+        F::PuzzleRoll(f) => {
+            // r208022 PuzzleRoll loader at 0x6826d0 reads item and count (row 2).
+            let paid = DoodadCtx::as_player(caster).is_some_and(|player| {
+                economy(ctx.server).try_bag_consume_item(
+                    ctx.server,
+                    player,
+                    item_task::DOODAD_INTERACTION,
+                    f.item_id,
+                    f.count,
+                )
+            });
+            set_to_next_phase(ctx, paid);
         }
         // Gathering chains: the 1.2 tables only carry the func id (`doodad_func_butchers`,
         // `doodad_func_fruit_picks`, ...), and the authored loot / depletion / regrowth
@@ -246,6 +255,7 @@ pub fn use_func(
             );
             set_to_next_phase(ctx, is_player(caster) && f.is_enter && next_phase > 0);
         }
+        F::InsertCounter(f) => items::insert_counter(f, ctx, caster),
         // --- C# stubs (logging only) ---
         // A phase-func contribution for the crime system (`social/bridges.rs`); the `Use`
         // arm has nothing to answer.
@@ -262,7 +272,6 @@ pub fn use_func(
         | F::CraftPack(_)
         | F::CraftStart(_)
         | F::HousingArea(_)
-        | F::InsertCounter(_)
         | F::NaviMarkPosToMap(_)
         | F::NaviNaming(_)
         | F::NaviOpenBounty(_)
@@ -364,15 +373,4 @@ pub(crate) fn quests_hook(server: &GameServer) -> Arc<dyn QuestsBridge> {
         .quests
         .get()
         .unwrap_or_else(|| Arc::new(NoBridge))
-}
-
-/// `Random.Shared.Next(min, max)` (`max` exclusive, `min` when equal). `None` where the C#
-/// throws (`min > max`).
-pub(crate) fn random_next(min: i32, max: i32) -> Option<i32> {
-    use rand::Rng;
-    match min.cmp(&max) {
-        std::cmp::Ordering::Greater => None,
-        std::cmp::Ordering::Equal => Some(min),
-        std::cmp::Ordering::Less => Some(rand::thread_rng().gen_range(min..max)),
-    }
 }

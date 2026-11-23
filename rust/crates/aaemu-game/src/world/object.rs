@@ -50,6 +50,7 @@ pub struct ObjectCore {
     /// is bound to (ladders, vehicle seats, transfer carriages). Set through
     /// `WorldInstance::set_sticky_parent`; not copied by transform clones (`CloneDetached`).
     sticky_parent: AtomicU32,
+    climbing: AtomicBool,
     /// `Transform._debugTrackers` (character ids; `ToggleDebugTracker`).
     debug_trackers: Mutex<Vec<u32>>,
 }
@@ -95,6 +96,14 @@ impl ObjectCore {
     /// `Transform.StickyParent?.GameObject.ObjId` (0 = none).
     pub fn sticky_parent(&self) -> u32 {
         self.sticky_parent.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn is_climbing(&self) -> bool {
+        self.climbing.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_climbing(&self, climbing: bool) {
+        self.climbing.store(climbing, Ordering::Relaxed);
     }
 
     pub(crate) fn set_sticky_parent_id(&self, obj_id: u32) {

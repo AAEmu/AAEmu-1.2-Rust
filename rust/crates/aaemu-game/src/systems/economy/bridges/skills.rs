@@ -788,11 +788,16 @@ impl EconomyForSkills {
             }
         }
         let template_id = target.with_base_unit(|b| b.template_id());
-        crate::systems::quests::events::on_doodad_interaction(
+        let phase = target
+            .as_doodad()
+            .map_or(0, |doodad| doodad.data().func_group_id);
+        crate::systems::quests::events::on_world_interaction(
             server,
             character,
             character,
             template_id,
+            world_interaction as i32,
+            phase,
         );
         true
     }

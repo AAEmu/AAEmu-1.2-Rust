@@ -980,6 +980,31 @@ impl ItemContainer {
             .is_some_and(|r| r.has_tasks)
     }
 
+    /// Number of new slots needed after reusing stacks of the acquisition's actual grade.
+    pub(crate) fn acquisition_slots(
+        &self,
+        template: &ItemTemplate,
+        grade: i32,
+        amount: i64,
+    ) -> i64 {
+        let grade = if template.fixed_grade >= 0 {
+            template.fixed_grade
+        } else {
+            grade
+        };
+        let max = i64::from(template.max_count);
+        let existing: i64 = self
+            .items
+            .iter()
+            .filter(|item| item.template_id == template.id && i32::from(item.grade) == grade)
+            .map(|item| (max - i64::from(item.count)).max(0))
+            .sum();
+        if max <= 0 {
+            return i64::MAX;
+        }
+        ((amount - existing).max(0) + max - 1) / max
+    }
+
     /// `AcquireDefaultItemEx`. `None` = `false` before anything was added (invalid template,
     /// not enough space, failed creation). The new / updated item ids are returned.
     #[allow(clippy::too_many_arguments)]
@@ -998,10 +1023,13 @@ impl ItemContainer {
             res.has_tasks = true;
             return Some(res);
         }
+        let template = env.data.template(template_id)?;
+        // The item factory always assigns a fixed grade. Look up the same grade when merging.
+        if template.fixed_grade >= 0 {
+            grade = template.fixed_grade;
+        }
         let (current, units) = self.items_by_template(template_id, grade);
-        let template = env.data.template(template_id)?; // Invalid item templateId
-                                                        // Backpacks have one equipment slot. Reject the complete request before creating
-                                                        // its first item, rather than failing after a partial acquisition.
+        // Backpacks have one equipment slot. Reject the complete request before creation.
         if self.is_equipment()
             && matches!(template.kind, TemplateKind::Backpack { .. })
             && (amount != 1 || self.get_item_by_slot(equip_slot::BACKPACK).is_some())
@@ -1013,9 +1041,6 @@ impl ItemContainer {
         // Trying to add too many item units to this container ?
         if amount > free {
             return None;
-        }
-        if template.fixed_grade >= 0 && !template.gradable {
-            grade = template.fixed_grade;
         }
         if grade == -1 {
             grade = template.fixed_grade;

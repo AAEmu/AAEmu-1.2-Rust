@@ -58,6 +58,8 @@ pub enum StartRefusal {
     UnknownQuest,
     /// `game_schedule_quests`: the quest's schedule window is not in progress.
     ScheduleWindow,
+    /// The configured daily quota has been reached.
+    DailyQuota,
     /// `CanAcceptSupplyItems`: this auto-equip trade pack cannot go to the backpack slot.
     SupplyItem(u32),
     /// The Start component's `unit_reqs` are not met.
@@ -100,6 +102,9 @@ pub struct KillUnitInfo {
     pub level: u8,
     /// `Npc.GetAggroRatingInPercent(owner.ObjId)` for the event's owner (100 when not an NPC).
     pub aggro_percent: f32,
+    /// World position at kill time. The 1.2 compact's ObjAggro range (r208022
+    /// loader 0x8a0450) provisionally limits credit by owner-to-victim distance.
+    pub position: (f32, f32, f32),
 }
 
 /// World facts an operation needs, captured before the character is locked.
@@ -204,6 +209,11 @@ const WIRE_QUEST_ID_LIMIT: u32 = (u16::MAX as u32 + 1) * 64;
 
 /// Minimum time between two WARN lines for the same refusal of the same quest.
 const REFUSAL_REPEAT_MS: i64 = 60_000;
+
+/// r208022 0x7e71b0 and 0x7e5d70 round up at 150% of the target.
+fn overdone_threshold(target: i32) -> i32 {
+    (target as f32 * 1.5).ceil() as i32
+}
 
 impl<'a> Ctx<'a> {
     // ----- plumbing -----
@@ -522,6 +532,20 @@ impl<'a> Ctx<'a> {
         let Some(si) = q.step_index(q.step) else {
             return false;
         };
+        if q.step == kind::REWARD {
+            let selected = q.selected_reward_index;
+            if selected == 0 && !self.has_reward_report(q.template_id) {
+                // The 1.2 Progress-to-Reward quests (e.g. 3238, 4291) have no
+                // report dialogue where the client can send a selective index.
+                let template_id = q.template_id;
+                let default = self.automatic_reward_choice(template_id);
+                if let Some(q) = self.quest_mut(h) {
+                    q.selected_reward_index = default;
+                }
+            } else if !self.valid_reward_choice(q.template_id, selected) {
+                return false;
+            }
+        }
         let mut res = self.run_components(h, si);
 
         // A LetItBeDone quest normally waits for a report. When it has no Ready step, an
@@ -714,26 +738,48 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// A quest that reaches its Reward step without a valid choice (no report act carried one:
-    /// auto-completing and journal-reported quests send 0) gets the first selective item
-    /// instead of none. The client UI sends a 1-based index and refuses to send 0 when the
-    /// quest has selective items.
-    fn default_selective_reward(&mut self, h: QuestHandle) {
-        let template_id = self.template_id_of(h);
+    fn has_reward_report(&self, template_id: u32) -> bool {
+        self.data.template(template_id).is_some_and(|template| {
+            template
+                .components_of(&self.data.components, kind::READY)
+                .iter()
+                .flat_map(|component| &component.acts)
+                .any(|&act| {
+                    matches!(
+                        self.data.acts[act].kind,
+                        ActKind::ConReportNpc { .. }
+                            | ActKind::ConReportDoodad { .. }
+                            | ActKind::ConReportJournal
+                    )
+                })
+        })
+    }
+
+    fn automatic_reward_choice(&self, template_id: u32) -> i32 {
+        let Some(template) = self.data.template(template_id) else {
+            return 0;
+        };
+        template
+            .components_of(&self.data.components, kind::REWARD)
+            .into_iter()
+            .flat_map(|component| &component.acts)
+            .map(|&act| &self.data.acts[act])
+            .filter_map(|act| match act.kind {
+                ActKind::SupplySelectiveItem { item_id, .. }
+                    if act.count > 0 && self.usable_reward_item(item_id) =>
+                {
+                    Some(act.selective_index)
+                }
+                _ => None,
+            })
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// r208022 0x4b1f30 indexes the authored Reward choices from one.
+    pub(crate) fn valid_reward_choice(&self, template_id: u32, selected: i32) -> bool {
         let count = self.selective_reward_count(template_id);
-        if count <= 0 {
-            return;
-        }
-        let who = format!("{} ({})", self.c.unit.name, self.c.id);
-        if let Some(q) = self.quest_mut(h) {
-            if q.selected_reward_index < 1 || q.selected_reward_index > count {
-                tracing::debug!(
-                    "Quest {template_id}, {who}: selective reward {} is not in 1..={count}, giving the first",
-                    q.selected_reward_index
-                );
-                q.selected_reward_index = 1;
-            }
-        }
+        count == 0 || (1..=count).contains(&selected)
     }
 
     /// `Step` setter (`SetStep`).
@@ -747,9 +793,6 @@ impl<'a> Ctx<'a> {
         // Finalize old Step (if any)
         if let Some(old) = q.step_index(q.step) {
             self.finalize_step(h, old);
-        }
-        if value == kind::REWARD {
-            self.default_selective_reward(h);
         }
         let template_id = {
             let Some(q) = self.quest_mut(h) else {
@@ -847,7 +890,7 @@ impl<'a> Ctx<'a> {
                 }
             }
             let ceil = |f: f32| (t.score as f32 * f).ceil() as i32;
-            if t.let_it_done && score >= ceil(3.0 / 2.0) {
+            if t.let_it_done && score >= overdone_threshold(t.score) {
                 return ObjectiveStatus::Overachieved;
             }
             if t.let_it_done && score > t.score {
@@ -870,7 +913,7 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
                 let o = obj(at.objective_index);
-                let s = if t.let_it_done && o >= at.count * 3 / 2 {
+                let s = if t.let_it_done && o >= overdone_threshold(at.count) {
                     ObjectiveStatus::Overachieved
                 } else if t.let_it_done && o > at.count {
                     ObjectiveStatus::ExtraProgress
@@ -947,11 +990,10 @@ impl<'a> Ctx<'a> {
                     score = score.wrapping_add(at.count.wrapping_mul(obj(at.objective_index)));
                 }
             }
-            let cap = (t.score as f32 * 3.0 / 2.0).ceil() as i32;
-            if t.let_it_done && score >= cap {
-                return cap as f32;
+            if t.let_it_done {
+                score = score.min(overdone_threshold(t.score));
             }
-            return 1.0 / t.score as f32 * score as f32;
+            return score as f32 / t.score as f32;
         }
         let mut highest = 0f32;
         for c in step.components.iter().filter(|c| c.is_active) {
@@ -960,12 +1002,14 @@ impl<'a> Ctx<'a> {
                 if at.objective_index == 0xFF {
                     continue;
                 }
-                let o = obj(at.objective_index);
-                if t.let_it_done && o >= at.count * 3 / 2 {
-                    highest = highest.max(at.count as f32 * 3.0 / 2.0);
+                if at.count <= 0 {
                     continue;
                 }
-                highest = highest.max(1.0 / at.count as f32 * o as f32);
+                let mut count = obj(at.objective_index);
+                if t.let_it_done {
+                    count = count.min(overdone_threshold(at.count));
+                }
+                highest = highest.max(count as f32 / at.count as f32);
             }
         }
         highest

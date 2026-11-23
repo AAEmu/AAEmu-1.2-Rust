@@ -492,6 +492,18 @@ pub trait EconomyBridge: Send + Sync {
         0
     }
 
+    /// Debit the full quantity from unlocked bag stacks, or leave them unchanged.
+    fn try_bag_consume_item(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _task: u8,
+        _template_id: u32,
+        _count: i32,
+    ) -> bool {
+        false
+    }
+
     /// `Inventory.Bag.ConsumeItem(task, templateId, count, null)`; returns the number consumed.
     fn bag_consume_item(
         &self,
@@ -772,6 +784,16 @@ pub trait QuestsBridge: Send + Sync {
 
     /// `QuestManager` kill objective counting (`Npc.DoDie` → `OnKill`).
     fn on_npc_killed(&self, _server: &GameServer, _player: &PlayerRef, _npc: &NpcRef) {}
+
+    fn on_npc_killed_by(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        npc: &NpcRef,
+        _killer: Option<&WorldObject>,
+    ) {
+        self.on_npc_killed(server, player, npc);
+    }
 
     /// `QuestManager.DoOnMonsterHuntEvents` for a scripted removal (`KillNpcWithoutCorpseEffect`,
     /// C# 10.x PR #1792): the monster hunt / monster group hunt / zone kill quest events only,

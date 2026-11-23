@@ -39,6 +39,7 @@ pub(super) struct Rec {
     trade_packs: Vec<u32>,
     /// Failed mails reported by `send_quest_reward_mails`.
     failed_mails: usize,
+    fail_item: Mutex<Option<u32>>,
     team: Mutex<Vec<PlayerRef>>,
 }
 
@@ -93,6 +94,9 @@ impl QuestHooks for Rec {
         count: i32,
         grade: u8,
     ) -> bool {
+        if *self.fail_item.lock().unwrap() == Some(template_id) {
+            return false;
+        }
         give_item(c, template_id, count);
         self.push(format!("item {task} {template_id} {count} {grade}"));
         true
@@ -503,10 +507,9 @@ fn sc_quest_context_packets_bytes() {
     let p = SCQuestContextResetPacket {
         quest_id: 130,
         body: body8,
-        component_id: 2,
     };
     let mut s = PacketStream::new();
-    s.write_u32(130).write_raw(&body8).write_u32(2);
+    s.write_u32(130).write_raw(&body8);
     assert_eq!(body(&p), s.into_bytes());
     assert_eq!(p.opcode(), sc::SCQuestContextResetPacket);
 
@@ -917,8 +920,8 @@ async fn full_quest_lifecycle_on_data() {
         assert_eq!(
             rec.take(),
             vec![
-                "exp 300 true",
                 "item 38 9000 1 1",
+                "exp 300 true",
                 "money 50",
                 // DropQuest after the reward: QuestCleanup (cleanup) and QuestDropped
                 // (destroy_when_drop) both consume the supply item
@@ -976,6 +979,7 @@ async fn reward_supply_acts_replace_level_supplies() {
         d.add_act(1122, 1122, 1122, 0, ActKind::SupplyExp { exp: 300 });
         d.add_act(1132, 1132, 1132, 0, ActKind::SupplyCopper { amount: 50 });
     });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
         for id in [110u32, 111, 112, 113] {
@@ -1023,6 +1027,11 @@ fn fallback_reward_quest(d: &mut QuestData, id: u32, level: u8, degree: i32) {
 }
 
 #[tokio::test]
+async fn quest_reward_scaling_defaults_to_client_factors() {
+    assert!(super::config::QuestConfig::default().reward_scaling);
+}
+
+#[tokio::test]
 async fn reward_scaling_off_pays_the_unscaled_supply() {
     let (server, rec) = server_with(|d| {
         d.supplies.insert(
@@ -1034,9 +1043,9 @@ async fn reward_scaling_off_pays_the_unscaled_supply() {
                 copper: 152,
             },
         );
-        // Degree 2, player level 10: the flag off keeps today's unscaled payout.
         fallback_reward_quest(d, 120, 10, 2);
     });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
         assert!(ctx.add_quest(120, false, 0, 0));
@@ -1420,6 +1429,8 @@ async fn let_it_done_with_only_an_auto_complete_reward_finishes_at_full_progress
         start(ctx, 4967);
         let interact = QuestEvent::Interaction {
             doodad_id: 5892,
+            wi_id: 19,
+            phase: 0,
             source_player_id: 1,
         };
         ctx.dispatch(&interact).unwrap();
@@ -1577,6 +1588,8 @@ async fn objective_acts_progress_on_their_events() {
         let inter = start(ctx, 4);
         ctx.dispatch(&QuestEvent::Interaction {
             doodad_id: 88,
+            wi_id: 1,
+            phase: 0,
             source_player_id: 1,
         })
         .unwrap();
@@ -1584,6 +1597,8 @@ async fn objective_acts_progress_on_their_events() {
         assert_eq!(ctx.st.quest(inter).unwrap().objectives[0], 1);
         ctx.dispatch(&QuestEvent::Interaction {
             doodad_id: 88,
+            wi_id: 1,
+            phase: 0,
             source_player_id: 1,
         })
         .unwrap();
@@ -1613,6 +1628,7 @@ async fn objective_acts_progress_on_their_events() {
         };
         let zk = QuestEvent::ZoneKill {
             zone_group_id: 12,
+            credited_character_id: 1,
             killer,
             victim,
         };
@@ -1782,6 +1798,7 @@ async fn zone_kill_faction_and_level_rules() {
         let kill = |ctx: &mut Ctx<'_>, killer: super::engine::KillUnitInfo, v| {
             ctx.dispatch(&QuestEvent::ZoneKill {
                 zone_group_id: 1,
+                credited_character_id: 1,
                 killer,
                 victim: v,
             })
@@ -2687,6 +2704,84 @@ async fn arming_a_saved_deadline_beyond_the_limit_clamps_time_ms_to_the_limit() 
 }
 
 #[tokio::test]
+async fn quest_reward_early_completion_scales_exp_act() {
+    let (server, rec) = server_with(|d| {
+        d.add_template(QuestTemplate {
+            let_it_done: true,
+            ..quest(20)
+        });
+        d.add_component(component(201, 20, kind::START));
+        d.add_act(201, 1, 1, 0, ActKind::ConAutoComplete);
+        d.add_component(component(202, 20, kind::PROGRESS));
+        d.add_act(
+            202,
+            2,
+            2,
+            4,
+            ActKind::ObjCraft {
+                craft_id: 1,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        d.add_component(component(203, 20, kind::REWARD));
+        d.add_act(203, 3, 3, 0, ActKind::SupplyExp { exp: 365 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        start(ctx, 20);
+        for _ in 0..2 {
+            ctx.dispatch(&QuestEvent::Craft { craft_id: 1 }).unwrap();
+        }
+        drain(ctx);
+        ctx.try_complete_quest_as_let_it_done(20, 0);
+        drain(ctx);
+        assert_eq!(rec.take(), vec!["exp 110 true"]);
+    });
+}
+
+#[tokio::test]
+async fn quest_reward_odd_objective_overdone_rounds_up() {
+    let (server, _) = server_with(|d| {
+        d.add_template(QuestTemplate {
+            let_it_done: true,
+            ..quest(20)
+        });
+        d.add_component(component(201, 20, kind::START));
+        d.add_act(201, 1, 1, 0, ActKind::ConAutoComplete);
+        d.add_component(component(202, 20, kind::PROGRESS));
+        d.add_act(
+            202,
+            2,
+            2,
+            3,
+            ActKind::ObjCraft {
+                craft_id: 1,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 20);
+        for (count, status) in [
+            (4, ObjectiveStatus::ExtraProgress),
+            (5, ObjectiveStatus::Overachieved),
+        ] {
+            ctx.st.quest_mut(h).unwrap().objectives[0] = count;
+            assert_eq!(ctx.objective_status(h), status);
+            assert!((ctx.objective_percent(h) - count as f32 / 3.0).abs() < 1e-6);
+        }
+    });
+}
+
+#[tokio::test]
 async fn let_it_done_and_score() {
     let (server, rec) = server_with(|d| {
         d.add_template(QuestTemplate {
@@ -2771,7 +2866,8 @@ async fn let_it_done_and_score() {
         // 12 >= 10: completed (no Ready / Reward step)
         assert!(!ctx.has_quest(21));
     });
-    assert_eq!(rec.take(), vec!["exp 10 true"]);
+    // At level 10 a level-zero quest pays half base XP, then the 120% overdone ratio.
+    assert_eq!(rec.take(), vec!["exp 6 true"]);
 }
 
 #[tokio::test]
@@ -2839,6 +2935,189 @@ async fn report_doodad_and_complete_quest_acts() {
             .st
             .subscribers(super::state::EventKind::ReportDoodad)
             .is_empty());
+    });
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_reward_fixed_grade_merges_into_existing_stack() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.items = ItemData::load(&conn).unwrap();
+    let server = test_server_with(gd);
+    let items = &server.game_data.items;
+    let template = items.template(28859).unwrap();
+    assert_eq!(template.fixed_grade, 3);
+    let mut c = character();
+    c.inventory = crate::models::character::Inventory::standalone(1, 1, 0);
+    let bag = c.inventory.bag().clone();
+    {
+        let mut bag = bag.lock().unwrap();
+        let mut item = Item::create(1, template, 1, 0, 1, items, 0);
+        item.slot = 0;
+        bag.items.push(item);
+        bag.update_free_slot_count();
+    }
+    let hooks = crate::systems::economy::bridges::EconomyForQuests;
+    assert!(hooks.acquire_default_item(&server, None, &mut c, 38, 28859, 1, 0));
+    assert_eq!(bag.lock().unwrap().items_by_template(28859, 3).1, 2);
+}
+
+#[tokio::test]
+async fn quest_reward_overflow_uses_stack_capacity_and_final_copper() {
+    let (server, rec) = server_with(|d| {
+        fallback_reward_quest(d, 40, 10, 2);
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 0,
+                copper: 152,
+            },
+        );
+        d.add_act(
+            402,
+            10,
+            10,
+            1,
+            ActKind::SupplySelectiveItem {
+                item_id: 11,
+                grade_id: 0,
+            },
+        );
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = true);
+    let mut c = character();
+    c.inventory = crate::models::character::Inventory::standalone(1, 1, 0);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = ctx.new_quest(40, 1);
+        ctx.set_step(h, kind::REWARD);
+        ctx.st
+            .quest_mut(h)
+            .unwrap()
+            .reward_items
+            .push(ItemCreationDefinition {
+                template_id: 11,
+                count: 1001,
+                grade_id: 0,
+            });
+        rec.take();
+        assert!(ctx.distribute_rewards(h, true));
+        assert_eq!(rec.take(), vec!["mail 40 1 114"]);
+    });
+}
+
+#[tokio::test]
+async fn quest_reward_retry_keeps_only_undelivered_items() {
+    let (server, rec) = server_with(|d| {
+        d.add_template(quest(40));
+        d.add_component(component(402, 40, kind::REWARD));
+        for id in [11, 12] {
+            d.add_act(
+                402,
+                id,
+                id,
+                1,
+                ActKind::SupplySelectiveItem {
+                    item_id: id,
+                    grade_id: 0,
+                },
+            );
+        }
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = ctx.new_quest(40, 1);
+        ctx.set_step(h, kind::REWARD);
+        for id in [11, 12] {
+            ctx.st
+                .quest_mut(h)
+                .unwrap()
+                .reward_items
+                .push(ItemCreationDefinition {
+                    template_id: id,
+                    count: 1,
+                    grade_id: 0,
+                });
+        }
+        *rec.fail_item.lock().unwrap() = Some(12);
+        assert!(!ctx.distribute_rewards(h, true));
+        assert_eq!(rec.take(), vec!["item 38 11 1 0"]);
+        *rec.fail_item.lock().unwrap() = None;
+        assert!(ctx.distribute_rewards(h, true));
+        assert_eq!(rec.take(), vec!["item 38 12 1 0"]);
+    });
+}
+
+#[tokio::test]
+async fn quest_reward_short_remove_act_leaves_bag_and_quest_intact() {
+    let (server, rec) = server_with(|d| {
+        d.add_template(quest(40));
+        d.add_component(component(401, 40, kind::REWARD));
+        d.add_act(401, 1, 1, 2, ActKind::SupplyRemoveItem { item_id: 4988 });
+        d.add_act(401, 2, 2, 0, ActKind::SupplyExp { exp: 25 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
+    let mut c = character();
+    give_item(&mut c, 4988, 1);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = ctx.new_quest(40, 1);
+        ctx.set_step(h, kind::REWARD);
+        assert!(!ctx.run_current_step(h));
+        assert!(rec.take().is_empty());
+        give_item(ctx.c, 4988, 1);
+        assert!(ctx.run_current_step(h));
+        let calls = rec.take();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls.contains(&"exp 25 true".to_string()), "{calls:?}");
+    });
+}
+
+#[tokio::test]
+async fn quest_reward_ready_report_requires_item_removal() {
+    let (server, rec) = server_with(|d| {
+        d.add_template(quest(40));
+        d.add_component(component(401, 40, kind::START));
+        d.add_act(401, 1, 1, 0, ActKind::ConAutoComplete);
+        d.add_component(component(402, 40, kind::READY));
+        d.add_act(402, 2, 2, 2, ActKind::SupplyRemoveItem { item_id: 4988 });
+        d.add_act(
+            402,
+            3,
+            3,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 7,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+        d.add_component(component(403, 40, kind::REWARD));
+        d.add_act(403, 4, 4, 0, ActKind::SupplyExp { exp: 25 });
+    });
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
+    let mut c = character();
+    give_item(&mut c, 4988, 1);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 40);
+        let report = QuestEvent::ReportNpc {
+            quest_id: 40,
+            npc_id: 7,
+            selected: 0,
+        };
+        ctx.dispatch(&report).unwrap();
+        drain(ctx);
+        assert_eq!(step_of(ctx, h), kind::READY);
+        assert!(rec.take().is_empty());
+        give_item(ctx.c, 4988, 1);
+        ctx.dispatch(&report).unwrap();
+        drain(ctx);
+        assert!(!ctx.has_quest(40));
+        let calls = rec.take();
+        assert!(calls.contains(&"exp 25 true".to_string()), "{calls:?}");
     });
 }
 
@@ -3224,9 +3503,7 @@ async fn daily_reset_and_item_destroy() {
         let sent = std::mem::take(&mut ctx.sent);
         assert_eq!(sent.len(), 1);
         let mut s = PacketStream::new();
-        s.write_u32(130)
-            .write_raw(&[0x08, 0, 0, 0, 0, 0, 0, 0])
-            .write_u32(2); // 131 still set
+        s.write_u32(130).write_raw(&[0x08, 0, 0, 0, 0, 0, 0, 0]); // 131 still set
         assert_eq!(sent[0], (sc::SCQuestContextResetPacket, s.into_bytes()));
         // Destroying the supply item (DropWhenDestroy) of quest 100 drops it
         assert!(ctx.add_quest(100, false, acceptor::NPC, 500));
@@ -3676,8 +3953,8 @@ async fn npc_quest_flow_through_packets_and_events() {
     assert_eq!(
         rec.take(),
         vec![
-            "exp 300 true",
             "item 38 9000 1 1",
+            "exp 300 true",
             "money 50",
             "consume 39 7000 1"
         ]
@@ -4919,12 +5196,150 @@ async fn real_compact_db_report_doodads_are_ready_doodad_func_quests() {
 
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_quest_reward_degree_and_player_gap() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.systems.quests = real_data(&conn);
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    for (level, expected) in [(10, 510), (11, 459), (15, 255), (21, 255), (22, 255)] {
+        let mut c = character();
+        c.unit.level = level;
+        with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+            let h = ctx.new_quest(97, 1);
+            ctx.set_step(h, kind::REWARD);
+            assert!(ctx.distribute_rewards(h, true));
+        });
+        assert_eq!(
+            rec.take(),
+            vec![format!("exp {expected} true"), "money 57".to_string()]
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_quest_rewards_skip_unusable_items() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.items = ItemData::load(&conn).unwrap();
+    gd.systems.quests = real_data(&conn);
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    for (quest_id, selected) in [(991, 1), (1005, 1), (3238, 0)] {
+        for bag_slots in [0, 10] {
+            let mut c = character();
+            c.unit.level = 22;
+            c.inventory = crate::models::character::Inventory::standalone(1, bag_slots, 0);
+            with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+                let h = ctx.new_quest(quest_id, 1);
+                rec.take();
+                if quest_id == 3238 {
+                    ctx.st.quest_mut(h).unwrap().init_finished = true;
+                    ctx.set_step(h, kind::PROGRESS);
+                    give_item(ctx.c, 19505, 5);
+                    ctx.dispatch(&QuestEvent::ItemGather {
+                        item_id: 19505,
+                        count: 5,
+                    })
+                    .unwrap();
+                    drain(ctx);
+                } else {
+                    ctx.set_step(h, kind::REWARD);
+                    ctx.st.quest_mut(h).unwrap().selected_reward_index = selected;
+                    assert!(ctx.run_current_step(h), "quest {quest_id}");
+                }
+                assert!(ctx.has_quest_completed(quest_id), "quest {quest_id}");
+            });
+            let calls = rec.take();
+            assert!(
+                calls.iter().any(|call| call.starts_with("exp "))
+                    && calls.iter().any(|call| call.starts_with("money "))
+                    && !calls
+                        .iter()
+                        .any(|call| call.starts_with("mail ") || call.starts_with("item ")),
+                "quest {quest_id} with {bag_slots} slots: {calls:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_quest_automatic_selective_reward_uses_first_option() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.items = ItemData::load(&conn).unwrap();
+    gd.systems.quests = real_data(&conn);
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = ctx.new_quest(4291, 1);
+        ctx.set_step(h, kind::REWARD);
+        assert!(ctx.run_current_step(h));
+        assert!(ctx.has_quest_completed(4291));
+    });
+    let calls = rec.take();
+    let items: Vec<_> = calls
+        .iter()
+        .filter(|call| call.starts_with("item "))
+        .collect();
+    assert_eq!(items.len(), 1, "{calls:?}");
+    assert!(items[0].contains(" 24061 "), "{calls:?}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn real_compact_db_quest_reward_first_exp_act_wins() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let mut gd = GameData::empty();
+    gd.systems.quests = real_data(&conn);
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        for (quest_id, expected) in [
+            (6315, vec!["exp 40800 true"]),
+            (4805, vec![]),
+            (2785, vec!["exp 8400 true"]),
+        ] {
+            let h = ctx.new_quest(quest_id, 1);
+            ctx.set_step(h, kind::REWARD);
+            rec.take();
+            ctx.run_current_step(h);
+            let calls = rec.take();
+            let xp: Vec<_> = calls
+                .iter()
+                .filter(|call| call.starts_with("exp "))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(xp, expected, "quest {quest_id}");
+        }
+    });
+}
+
+#[tokio::test]
+#[ignore]
 async fn real_compact_db_reward_acts_replace_level_supplies() {
     let Some(conn) = real_db() else {
         return;
     };
     let d = real_data(&conn);
-    // The two oracle examples: an act XP that differs from the level supply.
+    // Each explicit XP act differs from its fallback level supply.
     for (quest_id, act_exp, supply_exp) in [(2785u32, 8400, 3224), (1213, 110, 420)] {
         let t = d.template(quest_id).expect("quest template");
         let supply = d.supplies(t.level).expect("level supply");
@@ -4946,6 +5361,7 @@ async fn real_compact_db_reward_acts_replace_level_supplies() {
     let server = test_server_with(gd);
     let rec = Arc::new(Rec::default());
     server.systems.quests.hooks.install(rec.clone());
+    server.config.update(|cfg| cfg.quest.reward_scaling = false);
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
         for (quest_id, act_exp, supply_exp, supply_copper) in
@@ -5625,6 +6041,83 @@ async fn restart_request_requires_restart_on_fail_and_main_detail() {
 }
 
 #[tokio::test]
+async fn daily_quota_counts_active_and_completed_contexts_once() {
+    let (server, _) = server_with(|d| {
+        for (id, detail_id) in [
+            (130, detail::DAILY),
+            (131, detail::DAILY_GROUP),
+            (132, detail::DAILY_HUNT),
+            (133, detail::DAILY_LIVELIHOOD),
+            (134, detail::MAIN),
+        ] {
+            d.add_template(QuestTemplate {
+                detail_id,
+                ..quest(id)
+            });
+            d.add_component(component(id * 10, id, kind::START));
+            d.add_act(id * 10, id * 10, id * 10, 0, ActKind::ConAutoComplete);
+            d.add_component(component(id * 10 + 1, id, kind::READY));
+            d.add_act(
+                id * 10 + 1,
+                id * 10 + 1,
+                id * 10 + 1,
+                0,
+                ActKind::ConReportJournal,
+            );
+        }
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(130, false, 0, 0));
+        ctx.set_completed_quest_flag(130, true);
+        ctx.set_completed_quest_flag(131, true);
+        ctx.set_completed_quest_flag(134, true);
+        assert!(ctx.start_refusal(132, false).is_none());
+        server.config.update(|config| config.quest.daily_limit = 3);
+        assert!(ctx.start_refusal(132, false).is_none());
+        assert!(ctx.add_quest(132, false, 0, 0));
+        ctx.sent.clear();
+        ctx.answer_start_refusals = true;
+        assert!(!ctx.add_quest(133, false, 0, 0));
+        assert_eq!(
+            ctx.sent,
+            vec![(sc::SCQuestContextFailedPacket, failed_bytes(133, 0x1f))]
+        );
+        assert!(ctx.start_refusal(133, true).is_none());
+        ctx.reset_daily_quests(false);
+        assert!(ctx.start_refusal(133, false).is_none());
+    });
+}
+
+#[tokio::test]
+async fn restart_request_checks_total_supply_labor() {
+    let (server, _) = server_with(|d| {
+        timed_restart_quest(d, 95, true, 60_000);
+        d.add_component(component(959, 95, kind::SUPPLY));
+        d.add_act(959, 959, 959, 0, ActKind::SupplyLp { labor_power: 3 });
+        d.add_act(959, 960, 960, 0, ActKind::SupplyLp { labor_power: 5 });
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(95, false, acceptor::NPC, 500));
+        drain(ctx);
+        let h = active(ctx, 95);
+        ctx.sent.clear();
+        ctx.c.labor_power = 7;
+        assert!(!ctx.try_restart_quest(95));
+        assert_eq!(ctx.st.active_handle(95), Some(h));
+        assert_eq!(ctx.c.labor_power, 7);
+        assert_eq!(
+            ctx.sent,
+            vec![(sc::SCQuestContextFailedPacket, failed_bytes(95, 5))]
+        );
+        ctx.now_ms += 3_000;
+        ctx.c.labor_power = 8;
+        assert!(ctx.try_restart_quest(95));
+    });
+}
+
+#[tokio::test]
 async fn restart_request_is_throttled_per_character() {
     let (server, _) = server_with(|d| timed_restart_quest(d, 95, true, 60_000));
     let mut c = character();
@@ -5815,7 +6308,8 @@ mod engine_fixes {
                 );
                 match id {
                     301 => assert!(calls.contains(&"money 50".to_string()), "{calls:?}"),
-                    303 => assert!(calls.contains(&"exp 10 true".to_string()), "{calls:?}"),
+                    // Level-gap scaling halves 10 XP before the early-completion ratio.
+                    303 => assert!(calls.contains(&"exp 2 true".to_string()), "{calls:?}"),
                     _ => {}
                 }
             }
@@ -5866,23 +6360,21 @@ mod engine_fixes {
     }
 
     #[tokio::test]
-    async fn selective_reward_defaults_to_first_item_and_honours_the_choice() {
+    async fn reported_selective_reward_requires_a_choice_and_honours_valid_indices() {
         let (server, rec) = server_with(|d| {
-            selective_quest(d, 310, None);
+            selective_quest(d, 310, Some(7));
             selective_quest(d, 311, Some(7));
             selective_quest(d, 312, Some(7));
         });
         let mut c = character();
         with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
-            // No report act: the selected index stays 0, the first item is delivered.
+            // A quest with a report dialogue waits for the player to report and choose.
             start(ctx, 310);
             rec.take();
             ctx.dispatch(&QuestEvent::Craft { craft_id: 310 }).unwrap();
             drain(ctx);
-            assert!(!ctx.has_quest(310));
-            let calls = rec.take();
-            assert_eq!(calls.iter().filter(|l| l.starts_with("item")).count(), 1);
-            assert!(calls.iter().any(|l| l.contains(" 9001 ")), "{calls:?}");
+            assert!(ctx.has_quest(310));
+            assert!(rec.take().is_empty());
 
             // The client sends the 1-based index of the chosen item.
             for (id, selected, item) in [(311u32, 2, "9002"), (312, 1, "9001")] {
@@ -5909,7 +6401,7 @@ mod engine_fixes {
     }
 
     #[tokio::test]
-    async fn out_of_range_selective_index_gives_the_first_item() {
+    async fn quest_reward_refuses_out_of_range_choice() {
         let (server, rec) = server_with(|d| selective_quest(d, 313, Some(7)));
         let mut c = character();
         with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
@@ -5924,8 +6416,8 @@ mod engine_fixes {
             })
             .unwrap();
             drain(ctx);
-            let calls = rec.take();
-            assert!(calls.iter().any(|l| l.contains(" 9001 ")), "{calls:?}");
+            assert!(ctx.has_quest(313));
+            assert!(rec.take().is_empty());
         });
     }
 
@@ -6156,6 +6648,7 @@ async fn zone_kill_with_unset_level_range_accepts_any_victim() {
         let kill = |ctx: &mut Ctx<'_>, victim| {
             ctx.dispatch(&QuestEvent::ZoneKill {
                 zone_group_id: 1,
+                credited_character_id: 1,
                 killer: me.clone(),
                 victim,
             })
@@ -6196,6 +6689,7 @@ async fn zone_kill_team_share_is_not_reshared_by_the_receiver() {
         // Own kill: shared with the team.
         ctx.dispatch(&QuestEvent::ZoneKill {
             zone_group_id: 1,
+            credited_character_id: 1,
             killer: own(1),
             victim: victim.clone(),
         })
@@ -6208,6 +6702,7 @@ async fn zone_kill_team_share_is_not_reshared_by_the_receiver() {
         // A team mate's kill arrives: it counts, but is not shared again.
         ctx.dispatch(&QuestEvent::ZoneKill {
             zone_group_id: 1,
+            credited_character_id: 2,
             killer: own(2),
             victim,
         })
@@ -6970,4 +7465,192 @@ async fn client_quest_requests_name_an_npc_within_reach() {
         .drain()
         .iter()
         .any(|(op, _)| *op == sc::SCQuestContextFailedPacket));
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_interaction_3742_requires_wi_19() {
+    assert_interaction_objective(3742, 522, [(0, 18, 0), (1, 19, 0)]).await;
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_interaction_991_requires_destination_phase_5522() {
+    assert_interaction_objective(991, 163, [(2590, 19, 5521), (2590, 19, 5522)]).await;
+}
+
+async fn assert_interaction_objective(
+    quest_id: u32,
+    detail_id: u32,
+    [wrong, right]: [(u32, i32, u32); 2],
+) {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let data = real_data(&conn);
+    let act = data
+        .act_template(detail_id, "QuestActObjInteraction")
+        .unwrap();
+    assert_eq!(act.quest_id, quest_id);
+    let (server, _) = server_with(|data| {
+        // Quest 3742 authors count zero. Give the selector an observable slot
+        // in the fixture while preserving the shipped count in the loader.
+        single_act_quest(data, quest_id, act.count.max(1), act.kind.clone());
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, quest_id);
+        for ((doodad_id, wi_id, phase), count) in [(wrong, 0), (right, 1)] {
+            ctx.dispatch(&QuestEvent::Interaction {
+                doodad_id,
+                wi_id,
+                phase,
+                source_player_id: 1,
+            })
+            .unwrap();
+            assert_eq!(ctx.st.quest(h).unwrap().objectives[0], count);
+        }
+    });
+}
+
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn zone_kill_objective_6571_requires_client_display_count() {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let data = real_data(&conn);
+    let act = data
+        .acts
+        .iter()
+        .find(|act| {
+            act.quest_id == 6571
+                && act.detail_id == 128
+                && matches!(act.kind, ActKind::ObjZoneKill { .. })
+        })
+        .unwrap();
+    assert_eq!(act.count, 20);
+}
+
+#[tokio::test]
+async fn zone_kill_objective_mixed_count_does_not_complete_at_half() {
+    let (server, _rec) = server_with(|data| {
+        single_act_quest(data, 14, 20, zone_kill_act(10, 10, false, (0, 0, 0, 0)));
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let handle = start(ctx, 14);
+        let step = ctx
+            .st
+            .quest(handle)
+            .unwrap()
+            .steps
+            .iter()
+            .position(|step| step.kind == kind::PROGRESS)
+            .unwrap();
+        let path = super::state::ActPath {
+            step,
+            component: 0,
+            act: 0,
+        };
+        assert!(!ctx.act_run(handle, path, 10));
+        assert!(ctx.act_run(handle, path, 20));
+    });
+}
+
+#[tokio::test]
+async fn zone_kill_objective_self_only_uses_killer_instead_of_credit_recipient() {
+    let (server, _) = server_with(|data| {
+        single_act_quest(data, 14, 2, zone_kill_act(0, 2, false, (0, 0, 0, 0)));
+        let mut shared = zone_kill_act(0, 2, false, (0, 0, 0, 0));
+        if let ActKind::ObjZoneKill { is_party, .. } = &mut shared {
+            *is_party = true;
+        }
+        single_act_quest(data, 15, 2, shared);
+    });
+    let client = TestClient::new(&server, 1, 1001);
+    let recipient = spawn_player(&server, &client, character(), 0x100);
+    let enemy = WorldObject::from(&recipient);
+    let other_client = TestClient::new(&server, 2, 1002);
+    let other = spawn_player(
+        &server,
+        &other_client,
+        test_character(2, "Killer", 100.0, 100.0),
+        0x101,
+    );
+    for id in [14, 15] {
+        events::add_quest(&server, &recipient, id, false);
+    }
+    server.systems.quests.run_queued_evaluations(&server);
+    let victim = timed_hunt_victim(&server);
+    events::on_npc_killed_by(
+        &server,
+        &recipient,
+        &victim,
+        Some(&WorldObject::from(&other)),
+    );
+    server.systems.quests.run_queued_evaluations(&server);
+    {
+        let c = recipient.data();
+        assert_eq!(
+            c.quests
+                .active
+                .iter()
+                .find(|q| q.template_id == 14)
+                .unwrap()
+                .objectives[0],
+            0
+        );
+        assert_eq!(
+            c.quests
+                .active
+                .iter()
+                .find(|q| q.template_id == 15)
+                .unwrap()
+                .objectives[0],
+            1
+        );
+    }
+    events::on_npc_killed_by(&server, &recipient, &victim, Some(&enemy));
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(
+        recipient
+            .data()
+            .quests
+            .active
+            .iter()
+            .find(|q| q.template_id == 14)
+            .unwrap()
+            .objectives[0],
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn quest_objective_aggro_2432_requires_kill_within_range() {
+    let conn = real_db().expect("set AAEMU_COMPACT_DB to the 1.2 compact");
+    let data = real_data(&conn);
+    let act = data.act_template(4, "QuestActObjAggro").unwrap();
+    assert_eq!(act.quest_id, 2432);
+    let (server, _) = server_with(|data| {
+        single_act_quest(data, 2432, act.count, act.kind.clone());
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 2432);
+        let quest = ctx.st.quest_mut(h).unwrap();
+        quest.acceptor_type = acceptor::NPC;
+        quest.acceptor_id = 600;
+        for (distance, expected) in [(30.1, 0), (30.0, 1)] {
+            ctx.dispatch(&QuestEvent::Kill {
+                target: None,
+                killer: None,
+                victim: Some(super::engine::KillUnitInfo {
+                    npc_template_id: Some(600),
+                    position: (distance, 0.0, 0.0),
+                    aggro_percent: 10.0,
+                    ..Default::default()
+                }),
+            })
+            .unwrap();
+            assert_eq!(ctx.st.quest(h).unwrap().objectives[0], expected);
+        }
+    });
 }

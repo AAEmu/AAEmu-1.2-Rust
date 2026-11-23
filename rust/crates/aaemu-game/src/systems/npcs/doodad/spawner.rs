@@ -144,6 +144,9 @@ pub struct DoodadSpawnerDef {
     /// 50001-50008).
     pub family_id: u32,
     pub respawn_doodad_template_id: u32,
+    /// Inferred from placement data: r208022 RVA 0x84b8b0 reads the initial group separately
+    /// from the template. Zero selects the template's default group.
+    pub initial_func_group_id: u32,
 }
 
 impl DoodadSpawnerDef {
@@ -159,6 +162,7 @@ impl DoodadSpawnerDef {
             related_ids,
             family_id: json::u32_or(obj, "FamilyId", 0)?,
             respawn_doodad_template_id: json::u32_or(obj, "RespawnDoodadTemplateId", 0)?,
+            initial_func_group_id: json::u32_or(obj, "FuncGroupId", 0)?,
         })
     }
 }
@@ -250,6 +254,7 @@ pub struct DoodadSpawner {
     pub related_ids: Option<Vec<u32>>,
     /// Level-design logic family id of this placement (0 = none).
     pub family_id: u32,
+    initial_func_group_id: u32,
     state: Mutex<State>,
 }
 
@@ -368,6 +373,7 @@ impl DoodadSpawner {
                 related_ids: self.related_ids.clone(),
                 family_id: self.family_id,
                 respawn_doodad_template_id: 0,
+                initial_func_group_id: self.initial_func_group_id,
             },
             Some(world_id),
         ))
@@ -432,6 +438,7 @@ impl DoodadSpawner {
             special_link: def.base.special_link,
             related_ids: def.related_ids,
             family_id: def.family_id,
+            initial_func_group_id: def.initial_func_group_id,
             state: Mutex::new(State {
                 parent_world,
                 respawn_time: def.base.respawn_time,
@@ -667,6 +674,19 @@ impl DoodadSpawner {
             return None;
         };
         self.setup_doodad(server, &doodad, world.id);
+        if !ratio_replacement
+            && restored.is_none()
+            && self.initial_func_group_id != 0
+            && server
+                .game_data
+                .systems
+                .npcs
+                .doodad
+                .func_group(self.initial_func_group_id)
+                .is_some_and(|group| group.almighty == new_unit_id)
+        {
+            super::phase::set_func_group_id(server, &doodad, self.initial_func_group_id);
+        }
         if ratio_replacement {
             // Cleared by `phase::init_doodad` once the entry phase has run.
             doodad.data().phase.suppress_tod_catch_up = true;

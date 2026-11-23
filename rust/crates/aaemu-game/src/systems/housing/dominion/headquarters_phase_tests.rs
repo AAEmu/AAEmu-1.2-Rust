@@ -91,6 +91,7 @@ fn spawn_for_gm(server: &GameServer) -> (DoodadRef, TestClient) {
             related_ids: None,
             family_id: 0,
             respawn_doodad_template_id: 0,
+            initial_func_group_id: 0,
         },
         Some(0),
     ));

@@ -192,7 +192,9 @@ pub fn water_of(server: &GameServer, template_id: u32, ocean_level: f32) -> Arc<
 }
 
 fn water_store(server: &GameServer, world: &WorldInstance) -> Arc<WaterBodies> {
-    if encounters::instance_scoped_water(world.template.name.as_str()) {
+    if world.template.xml_world.is_instance > 0
+        || encounters::instance_scoped_water(world.template.name.as_str())
+    {
         return server
             .systems
             .ai

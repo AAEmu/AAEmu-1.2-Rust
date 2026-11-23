@@ -91,12 +91,17 @@ pub fn refresh_phase_caches(data: &DoodadData, d: &mut Doodad) {
         }
     }
     d.phase.final_after_ms = final_after;
+    d.phase.growth_scale_end_ms = None;
     d.update_final_phase_end();
 }
 
 /// The `FuncGroupId` setter: on a change, `PhaseTime = now`, `Save()` when persistent, and the
 /// current funcs / phase funcs / ToD trigger caches.
 pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
+    set_func_group_id_at(server, doodad, value, now_ms());
+}
+
+fn set_func_group_id_at(server: &GameServer, doodad: &DoodadRef, value: u32, phase_time_ms: i64) {
     let (save, previous) = {
         let mut d = doodad.data();
         if value == d.func_group_id {
@@ -107,7 +112,8 @@ pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
         d.phase.interaction_counts.clear();
         d.phase.pending_loot = None;
         d.phase.pending_loot_from_bag = false;
-        d.phase_time_ms = now_ms(); // Save PhaseTime at start of new phase (group)
+        d.phase.puzzle_task = 0;
+        d.phase_time_ms = phase_time_ms;
         let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
         (persistent, previous)
@@ -516,6 +522,10 @@ fn use_doodad_with_gate(
         }
     }
 
+    if super::tasks::retry_puzzle_prize(ctx, caster) {
+        return;
+    }
+
     if func_group_id > 0 {
         if !crate::systems::instances::mentoring::allows_phase_request(ctx, func_group_id) {
             return;
@@ -523,6 +533,7 @@ fn use_doodad_with_gate(
         set_func_group_id(server, &ctx.doodad, func_group_id as u32);
     }
 
+    let mut interaction = DoodadCtx::new(server, ctx.world.clone(), ctx.doodad.clone());
     let mut chained = false;
     loop {
         let (template_id, current) = {
@@ -532,6 +543,8 @@ fn use_doodad_with_gate(
             d.phase.list_group_id.clear();
             (d.template_id, d.func_group_id)
         };
+        interaction.interaction_group = Some(current);
+        let ctx = &interaction;
         tracing::trace!(
             "Use: TemplateId {template_id}, Using phase {current} with SkillId {skill_id}"
         );
@@ -650,7 +663,7 @@ fn use_doodad_with_gate(
 /// (and its regrowth timer) through the normal `DoChangePhase` after the loop. The next phase
 /// was never entered (its phase funcs did not run and no `SCDoodadPhaseChanged` was sent), so
 /// only the group is restored.
-fn keep_pending_loot_in(ctx: &DoodadCtx<'_>, loot_group: u32) {
+pub(super) fn keep_pending_loot_in(ctx: &DoodadCtx<'_>, loot_group: u32) {
     let pending = {
         let mut d = ctx.doodad.data();
         if d.phase.deleted || d.func_group_id == loot_group {
@@ -760,7 +773,12 @@ pub fn do_func(
     }
 
     // then perform the function (DoodadFunc.Use -> template?.Use)
+    let (mut contribution, mut required) = (1, func.count);
     if let Some(t) = ctx.data().func_template(func.func_id, &func.func_type) {
+        if let FuncTemplate::InsertCounter(counter) = t {
+            contribution = counter.item_count as u32;
+            required = counter.count;
+        }
         if !crate::systems::instances::mentoring::authorize(ctx, caster, skill_id, t) {
             return true;
         }
@@ -787,12 +805,12 @@ pub fn do_func(
         return pending_loot || func.func_type != "DoodadFuncLootItem";
     }
     crate::systems::instances::mentoring::succeeded(ctx, caster);
-    if func.count > 1 {
+    if required > 1 {
         let complete = {
             let mut d = ctx.doodad.data();
             let count = d.phase.interaction_counts.entry(func.func_key).or_default();
-            *count += 1;
-            *count >= func.count as u32
+            *count = count.saturating_add(contribution);
+            *count >= required as u32
         };
         if !complete {
             ctx.doodad.data().phase.to_next_phase = false;
@@ -800,7 +818,15 @@ pub fn do_func(
             return true;
         }
     }
-    if func.next_phase == -1 {
+    // ConditionalUse descriptor 25 in the 1.2 compact authors -1 for its item branch.
+    // Resolve that inferred directive through the existing use-transition rules.
+    let next_phase = if override_phase != 0 {
+        ctx.doodad.data().phase.override_phase = 0;
+        override_phase
+    } else {
+        func.next_phase
+    };
+    if next_phase == -1 {
         // We stay in the current phase; the check is needed for Windstone id=1473
         if !has_only_group_kind_start(ctx) {
             if tasks::cancel_func_task(&ctx.doodad) {
@@ -810,13 +836,7 @@ pub fn do_func(
         }
         return true;
     }
-    if override_phase > 0 {
-        // occurs in DoodadFuncConditionalUse
-        set_func_group_id(ctx.server, &ctx.doodad, override_phase as u32);
-        ctx.doodad.data().phase.override_phase = 0;
-    } else {
-        set_func_group_id(ctx.server, &ctx.doodad, func.next_phase as u32);
-    }
+    set_func_group_id(ctx.server, &ctx.doodad, next_phase as u32);
     false
 }
 
@@ -887,13 +907,23 @@ pub(crate) fn despawn_or_delete_if_group(
 }
 
 /// `DoPhaseFuncs(caster, ref nextPhase)`: `true` = the phase did not pass (abort).
-fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase: &mut i32) -> bool {
+fn do_phase_funcs(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    next_phase: &mut i32,
+    phase_start_ms: Option<i64>,
+) -> bool {
     if *next_phase <= 0 {
         return true;
     }
     // Changing the phase.
-    set_func_group_id(ctx.server, &ctx.doodad, *next_phase as u32);
     let group = *next_phase as u32;
+    if let Some(start) = phase_start_ms {
+        set_func_group_id_at(ctx.server, &ctx.doodad, group, start);
+        ctx.doodad.data().phase.override_phase_time_ms = start;
+    } else {
+        set_func_group_id(ctx.server, &ctx.doodad, group);
+    }
     let recursed = {
         let mut d = ctx.doodad.data();
         if d.phase.list_group_id.contains(&group) {
@@ -920,6 +950,7 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
     );
 
     let phase_funcs = ctx.data().phase_funcs(group);
+    phase_funcs::refresh_growth_scale_deadline(ctx);
     if phase_funcs.is_empty() {
         return false; // no phase functions for FuncGroupId
     }
@@ -962,7 +993,14 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
     let (triggers, others): (Vec<_>, Vec<_>) = phase_funcs
         .iter()
         .partition(|pf| pf.func_type == "DoodadFuncPulseTrigger");
+    let puzzle_in = phase_funcs::select_puzzle_input(ctx, phase_funcs);
+    let puzzle_out = phase_funcs::select_puzzle_outcome(ctx, phase_funcs);
     for pf in others.into_iter().chain(triggers) {
+        match pf.func_type.as_str() {
+            "DoodadFuncPuzzleIn" if puzzle_in != Some(pf.func_id) => continue,
+            "DoodadFuncPuzzleOut" if puzzle_out != Some(pf.func_id) => continue,
+            _ => {}
+        }
         if deferred_ratio && pf.func_type == "DoodadFuncRatioChange" {
             continue;
         }
@@ -983,7 +1021,7 @@ fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase:
     if override_phase != 0 && stop && func_group_id as i32 != override_phase {
         *next_phase = override_phase;
         ctx.doodad.data().phase.override_phase = 0;
-        return do_phase_funcs(ctx, caster, next_phase);
+        return do_phase_funcs(ctx, caster, next_phase, phase_start_ms);
     }
     if !deleted {
         db::save(ctx.server, &ctx.doodad); // let's save the doodad in the database
@@ -1037,19 +1075,44 @@ pub(crate) fn pulse_trigger_next_phase(ctx: &DoodadCtx<'_>, group: u32, next_pha
 /// `DoChangePhase(caster, nextPhase)`: phase funcs of `next_phase`, then
 /// `SCDoodadPhaseChangedPacket` (unless deleted). `true` = aborted.
 pub fn do_change_phase(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase: i32) -> bool {
+    do_change_phase_at(ctx, caster, next_phase, None)
+}
+
+/// Growth catch-up is inferred from the chained delays in 1.2 growth descriptors
+/// 194–196. Each completed growth phase leaves its deadline as its successor's start.
+pub(super) fn do_change_phase_at(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    next_phase: i32,
+    phase_start_ms: Option<i64>,
+) -> bool {
     let Some(_operation) = Operation::enter(&ctx.doodad) else {
         return true;
     };
     if next_phase <= 0 {
         return false;
     }
+    if matches!(
+        ctx.doodad.data().phase.pending_loot,
+        Some(crate::models::doodad::PendingDoodadLoot::Puzzle { .. })
+    ) {
+        return true;
+    }
     tracing::trace!(
         "DoChangePhase: ObjId {}, nextPhase {next_phase}",
         ctx.doodad.obj_id
     );
     let mut np = next_phase;
-    let stop = do_phase_funcs(ctx, caster, &mut np);
+    let stop = do_phase_funcs(ctx, caster, &mut np, phase_start_ms);
+    if phase_start_ms.is_some() {
+        ctx.doodad.data().phase.override_phase_time_ms = 0;
+    }
     // the phase change packet must be after the phase functions (correct FuncGroupId)
+    broadcast_phase(ctx);
+    stop
+}
+
+pub(super) fn broadcast_phase(ctx: &DoodadCtx<'_>) {
     let packet = {
         let d = ctx.doodad.data();
         (!d.phase.deleted).then(|| SCDoodadPhaseChangedPacket::new(ctx.doodad.obj_id, &d, now_ms()))
@@ -1057,7 +1120,6 @@ pub fn do_change_phase(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_p
     if let Some(p) = packet {
         ctx.broadcast(&p);
     }
-    stop
 }
 
 /// `OnSkillHit(caster, skillId)`: a matching skill contributes one hit to the current phase.

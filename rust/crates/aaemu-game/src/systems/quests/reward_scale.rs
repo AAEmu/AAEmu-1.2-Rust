@@ -1,4 +1,4 @@
-//! 1.2 client quest reward scaling (`Quest:RewardScaling`, default off).
+//! 1.2 client quest reward scaling (`Quest:RewardScaling`, enabled by default).
 //!
 //! `X2Quest.GetQuestContextRewardExp` (`FUN_394a1370`) and `...RewardCopper`
 //! (`FUN_394a0fd0`) compute the number the quest window shows from the client tables:
@@ -10,12 +10,8 @@
 //! * Exp, act value or scaled supply, is then reduced by the quest-vs-player level gap
 //!   (`FUN_397d3810`). Copper has no gap factor.
 //!
-//! The amounts are display-only in the client: the server decides what it pays (the quest
-//! packets carry no reward figure). Whether the original zone server applied these factors is
-//! INFERRED from the client UI (a window showing a different number than the payout would be a
-//! visible bug); no capture of a retail grant exists. The flag keeps today's unscaled payout
-//! until the live check (quest-window number vs. exp / copper actually gained) settles it
-//! (`porting-md#2`, capture-pending; see `PORTING.md`).
+//! The server uses the r208022 display formulas for payout. The flag restores unscaled
+//! base amounts for servers that need the previous behavior.
 
 /// Degree factor of the `quest_supplies` fallback (`FUN_397d5eb0` / `FUN_397d5dd0`).
 pub fn degree_factor(degree: i32) -> f32 {
@@ -41,18 +37,17 @@ pub fn scaled_supply_copper(copper: i32, degree: i32) -> i32 {
 /// Exp level-gap factor (`FUN_397d3810`): `base` for a quest level `quest_level` paid to a
 /// character of `player_level`.
 ///
-/// The full payout needs a quest at most 5 levels below the player (up to player level 21);
-/// each further level pays 10 % less, and 10 or more levels down pays 50 %. From player level
-/// 22 the client disables the reduction entirely (the `g = p` branch, a discontinuity in the
-/// original formula).
+/// The allowance `g` is `max(5, (int)((p + 1) * 0.2 + 0.5))`: a quest at most `g` levels below
+/// the player pays in full, each further level pays 10 % less, and `g + 5` or more levels down
+/// pays 50 %. The Ghidra output shows the larger branch as `&param_3` (the player level),
+/// which would disable the reduction from player level 22. That is the MSVC `std::max`
+/// temporary sharing the argument's stack slot. The live r208022 client shows 255 XP, not
+/// 510, for quest 97 (quest level 5, base 510) at player level 22 (2026-11-23,
+/// `lanes\live-audit\run\audit-evidence.txt`), which only the max reading gives.
 pub fn gap_exp(base: i32, quest_level: u8, player_level: u8) -> i32 {
     let p = i32::from(player_level);
     let q = i32::from(quest_level);
-    let g = if ((p + 1) as f32 * 0.2 + 0.5) as i32 > 4 {
-        p
-    } else {
-        5
-    };
+    let g = (((p + 1) as f32 * 0.2 + 0.5) as i32).max(5);
     let d = g - p + q;
     if d >= 0 {
         base
@@ -93,9 +88,15 @@ mod tests {
         for (q, want) in [(5, 1000), (4, 900), (3, 800), (2, 700), (1, 600), (0, 500)] {
             assert_eq!(gap_exp(1000, q, 10), want, "p=10 q={q}");
         }
-        // p = 21 is the last reduced level (d = -5 -> 50 %); p = 22 never reduces.
+        // The allowance stays 5 up to player level 26, so level 22 still reduces
+        // (live r208022: quest 97 shows 255 XP at level 22).
         assert_eq!(gap_exp(1000, 11, 21), 500);
-        assert_eq!(gap_exp(1000, 1, 22), 1000);
+        assert_eq!(gap_exp(1000, 1, 22), 500);
+        assert_eq!(gap_exp(1000, 17, 22), 1000);
+        assert_eq!(gap_exp(1000, 16, 22), 900);
+        // From level 27 the allowance grows to (int)(28 * 0.2 + 0.5) = 6.
+        assert_eq!(gap_exp(1000, 21, 27), 1000);
+        assert_eq!(gap_exp(1000, 20, 27), 900);
         assert_eq!(gap_exp(1000, 1, 1), 1000);
         // d < -4 branch truncates the half toward zero.
         assert_eq!(gap_exp(1001, 0, 10), 500);

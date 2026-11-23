@@ -350,6 +350,7 @@ fn new_spawner_with(
             related_ids,
             family_id,
             respawn_doodad_template_id: 0,
+            initial_func_group_id: 0,
         },
         Some(0),
     ))
@@ -1382,6 +1383,191 @@ async fn use_then_timer_returns_to_start_phase() {
     assert_eq!(group(&d), 10);
     assert_eq!(f.phase_packets(), vec![10]);
     assert_eq!(d.data().phase.func_task, 0);
+}
+
+#[tokio::test]
+async fn audit_timer_only_passes_requester_when_authored() {
+    for keep_requester in [true, false] {
+        let b = Builder::default()
+            .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2), (13, 2)])
+            .fake_use(10, 1, 11)
+            .phase_func(
+                11,
+                FuncTemplate::Timer(DoodadFuncTimer {
+                    id: 5,
+                    delay: 500,
+                    next_phase: 12,
+                    keep_requester,
+                    ..DoodadFuncTimer::default()
+                }),
+            )
+            .phase_func(
+                12,
+                FuncTemplate::CraftDirect(DoodadFuncCraftDirect {
+                    id: 6,
+                    next_phase: 13,
+                }),
+            );
+        let mut f = fx(b);
+        let d = f.doodad(TEMPLATE);
+        f.use_(&d);
+        assert_eq!(group(&d), 11);
+        assert_eq!(f.advance(500), 1);
+        assert_eq!(group(&d), if keep_requester { 13 } else { 12 });
+    }
+}
+
+#[tokio::test]
+async fn audit_negative_use_override_takes_priority_over_row_destination() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .fake_use(10, 1, 11);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d.clone());
+    d.data().phase.override_phase = -1;
+    let func = ctx.data().funcs_for_group(10).first().unwrap();
+    assert!(do_func(&ctx, Some(&f.caster()), 0, Some(func)));
+    assert_eq!(d.data().phase.override_phase, 0);
+    assert!(d.data().phase.deleted);
+}
+
+#[tokio::test]
+async fn audit_puzzle_input_sets_model_and_outcome_waits_for_authored_delay() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2), (12, 2)])
+        .fake_use(10, 1, 11)
+        .phase_func(
+            10,
+            FuncTemplate::PuzzleIn(DoodadFuncPuzzleIn {
+                id: 1,
+                group_id: 3,
+                ratio: 100.0,
+            }),
+        )
+        .phase_func(
+            11,
+            FuncTemplate::PuzzleOut(DoodadFuncPuzzleOut {
+                id: 1,
+                group_id: 5,
+                ratio: 100.0,
+                next_phase: 10,
+                delay: 6400,
+                ..DoodadFuncPuzzleOut::default()
+            }),
+        )
+        .phase_func(
+            11,
+            FuncTemplate::PuzzleOut(DoodadFuncPuzzleOut {
+                id: 2,
+                group_id: 3,
+                ratio: 100.0,
+                next_phase: 12,
+                delay: 6400,
+                anim: "j".into(),
+                ..DoodadFuncPuzzleOut::default()
+            }),
+        )
+        .phase_func(11, clout_to(0, 3, 1000, 11));
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    assert_eq!(d.data().puzzle_group, 3);
+    f.use_(&d);
+    assert_eq!(group(&d), 11);
+    assert!(f
+        .client
+        .drain_ops()
+        .contains(&sc::SCDoodadPuzzleScenePacket));
+    assert_eq!(f.advance(1000), 1);
+    assert_eq!(group(&d), 11);
+    assert_eq!(f.advance(5399), 0);
+    assert_eq!(f.advance(1), 1);
+    assert_eq!(group(&d), 12);
+}
+
+#[tokio::test]
+async fn audit_puzzle_roll_requires_its_item() {
+    let mut b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .func(10, "DoodadFuncPuzzleRoll", 11, FAKE_SKILL);
+    b.data
+        .func_templates
+        .entry("DoodadFuncPuzzleRoll")
+        .or_default()
+        .insert(
+            1,
+            FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll {
+                id: 1,
+                item_id: 25116,
+                count: 1,
+            }),
+        );
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.use_(&d);
+    assert_eq!(group(&d), 10);
+}
+
+#[tokio::test]
+async fn audit_navi_removal_only_fires_in_its_phase() {
+    let build = || {
+        Builder::default()
+            .template(TEMPLATE, &[(10, 1), (11, 2)])
+            .phase_func(
+                10,
+                FuncTemplate::NaviRemoveTimer(DoodadFuncNaviRemoveTimer {
+                    id: 1,
+                    after: 600_000,
+                }),
+            )
+    };
+    let mut f = fx(build());
+    let doodad = f.doodad(TEMPLATE);
+    assert_eq!(f.advance(599_999), 0);
+    assert!(!doodad.data().phase.deleted);
+    assert_eq!(f.advance(1), 1);
+    assert!(doodad.data().phase.deleted);
+
+    let mut f = fx(build());
+    let doodad = f.doodad(TEMPLATE);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), doodad.clone());
+    do_change_phase(&ctx, None, 11);
+    f.advance(600_000);
+    assert!(!doodad.data().phase.deleted);
+}
+
+#[tokio::test]
+async fn audit_water_phase_shifts_the_local_volume() {
+    use crate::systems::ai::physics::water::{WaterBodyArea, WaterBodyAreaType};
+    use crate::systems::skills::controllers::Vec3;
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_func(
+            11,
+            FuncTemplate::WaterVolume(DoodadFuncWaterVolume {
+                id: 1,
+                level_change: -5.0,
+                duration: 0.0,
+            }),
+        );
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    let water = crate::systems::ai::physics::world_water(&f.server, &f.world);
+    let mut area = WaterBodyArea::new("test", WaterBodyAreaType::Polygon);
+    area.depth = 30.0;
+    area.points = vec![
+        Vec3::new(110.0, 120.0, 110.0),
+        Vec3::new(130.0, 120.0, 110.0),
+        Vec3::new(130.0, 140.0, 110.0),
+        Vec3::new(110.0, 140.0, 110.0),
+    ];
+    area.update_bounds();
+    water.add(area);
+    let probe = Vec3::new(120.0, 130.0, 112.0);
+    assert_eq!(water.get_water_surface(probe).0, 110.0);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d);
+    do_change_phase(&ctx, None, 11);
+    assert_eq!(water.get_water_surface(probe).0, 105.0);
 }
 
 #[tokio::test]
@@ -4817,4 +5003,257 @@ async fn real_compact_db_fish_schools_partition_all_species_and_activate_buff_wi
             "deleting school must clear buff {SCHOOL_BUFF}"
         );
     }
+}
+
+fn harvest_audit_data() -> DoodadData {
+    let path = std::env::var("AAEMU_COMPACT_DB").expect("AAEMU_COMPACT_DB");
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    DoodadData::load_from(&conn).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_growth_carries_offline_time_through_two_deadlines() {
+    use crate::systems::npcs::doodad::natural::{self, StateRow};
+
+    let f = fx(Builder {
+        data: harvest_audit_data(),
+        ..Default::default()
+    });
+    let phase_time_ms = now_ms() - 6_000_000;
+    let key = natural::spawn_key(1017, 120.0, 130.0, 100.0);
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .persistence
+        .natural
+        .enable_for_test(vec![StateRow {
+            world_id: 0,
+            spawn_key: key,
+            template_id: 1017,
+            func_group_id: 1489,
+            plant_time: phase_time_ms / 1000,
+            growth_time_ms: 0,
+            phase_time_ms,
+            data: 0,
+            interaction_counts: "{}".into(),
+            updated: 0,
+        }]);
+
+    let d = new_spawner(1017, 501)
+        .spawn(&f.server, 0)
+        .expect("restored");
+    assert_eq!(group(&d), 1489);
+    f.advance(1);
+    assert_eq!(group(&d), 1490);
+    f.advance(1);
+    assert_eq!(group(&d), 1491);
+    let d = d.data();
+    assert_eq!(d.phase_time_ms, phase_time_ms + 1_028_572 + 4_114_286);
+    assert_eq!(d.growth_time_ms, d.phase_time_ms + 5_142_858);
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_growth_scale_uses_client_endpoints_and_remaining_delay() {
+    let mut f = fx(Builder {
+        data: harvest_audit_data(),
+        ..Default::default()
+    });
+    let ctx_data = &f.server.game_data.systems.npcs.doodad;
+    let Some(FuncTemplate::Growth(growth)) = ctx_data.phase_func_template(1047, "DoodadFuncGrowth")
+    else {
+        panic!("missing growth descriptor 1047");
+    };
+    assert_eq!(
+        (growth.start_scale, growth.end_scale, growth.delay),
+        (300, 1000, 30_000)
+    );
+    let d = f.doodad(5059);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d.clone());
+    let d = d.data();
+    let packet = SCDoodadPhaseChangedPacket::new(ctx.doodad.obj_id, &d, d.phase_time_ms);
+    assert_eq!((packet.func_group_id, packet.time_left), (13149, 30_000));
+    let packet = SCDoodadPhaseChangedPacket::new(ctx.doodad.obj_id, &d, d.phase_time_ms + 15_000);
+    assert_eq!((packet.func_group_id, packet.time_left), (13149, 15_000));
+    assert_eq!(d.scale, 1.0);
+    drop(d);
+
+    // The persistent loader supplies both saved timestamps before running phase entry.
+    let phase_time_ms = now_ms() - 15_000;
+    {
+        let mut d = ctx.doodad.data();
+        d.phase_time_ms = phase_time_ms;
+        d.phase.override_phase_time_ms = phase_time_ms;
+    }
+    init_doodad(&ctx);
+    let d = ctx.doodad.data();
+    assert_eq!(d.func_group_id, 13149);
+    assert_eq!(d.growth_time_ms, phase_time_ms + 30_000);
+    assert_eq!(d.scale, 1.0);
+    drop(d);
+
+    // Compact group 9439 runs both Growth 1083 (1000 -> 1500) and Timer 3021.
+    // At 2x growth speed the timer still runs for 1000 ms, while the animation needs 500 ms.
+    f.server.systems.npcs.doodads.set_growth_rate(2.0);
+    let d = manager::create(&f.server, &f.world, 0x501, 3768, None, true).unwrap();
+    d.data().transform.set_xyz(120.0, 130.0, 100.0);
+    set_func_group_id(&f.server, &d, 9439);
+    manager::spawn(&f.server, &f.world, &d);
+    let ctx = DoodadCtx::new(&f.server, f.world.clone(), d);
+    init_doodad(&ctx);
+    let d = ctx.doodad.data();
+    let packet = SCDoodadPhaseChangedPacket::new(ctx.doodad.obj_id, &d, d.phase_time_ms);
+    assert_eq!((packet.func_group_id, packet.time_left), (9439, 500));
+    assert!(
+        d.time_left(d.phase_time_ms) >= 1000,
+        "timer remains independent"
+    );
+    let mut snapshot = aaemu_commons::PacketStream::new();
+    d.write(
+        ctx.doodad.obj_id,
+        &d.transform.local(),
+        d.phase_time_ms + 250,
+        &mut snapshot,
+    );
+    let snapshot = snapshot.into_bytes();
+    assert_eq!(
+        u32::from_le_bytes(snapshot[58..62].try_into().unwrap()),
+        250
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_doodad_insert_counter_debits_and_restores_progress() {
+    use crate::systems::npcs::doodad::natural;
+    use crate::systems::npcs::hooks::EconomyBridge;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    #[derive(Default)]
+    struct Contributions(AtomicI32);
+
+    impl EconomyBridge for Contributions {
+        fn try_bag_consume_item(
+            &self,
+            _server: &GameServer,
+            _player: &PlayerRef,
+            _task: u8,
+            template_id: u32,
+            count: i32,
+        ) -> bool {
+            assert_eq!((template_id, count), (27301, 1));
+            self.0
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |balance| {
+                    (balance >= count).then(|| balance - count)
+                })
+                .is_ok()
+        }
+    }
+
+    let f = fx(Builder {
+        data: harvest_audit_data(),
+        ..Default::default()
+    });
+    let contributions = Arc::new(Contributions::default());
+    f.server
+        .systems
+        .npcs
+        .hooks
+        .economy
+        .install(contributions.clone());
+    let store = &f.server.systems.npcs.doodads.persistence.natural;
+    store.enable_for_test(Vec::new());
+    let spawner = new_spawner(7229, 501);
+    let d = spawner.spawn(&f.server, 0).expect("counter doodad");
+    set_func_group_id(&f.server, &d, 19752);
+
+    let caster = f.caster();
+    let use_counter = |d: &DoodadRef| {
+        manager::use_doodad(&f.server, &f.world, d, Some(&caster), 23780, 0);
+    };
+    use_counter(&d);
+    assert!(d.data().phase.interaction_counts.is_empty());
+    contributions.0.store(4, Ordering::Relaxed);
+    for _ in 0..4 {
+        use_counter(&d);
+    }
+    assert_eq!(group(&d), 19752);
+    assert_eq!(contributions.0.load(Ordering::Relaxed), 0);
+    assert_eq!(d.data().phase.interaction_counts.get(&15994), Some(&4));
+
+    let key = natural::spawn_key(7229, 120.0, 130.0, 100.0);
+    let (_, saved) = store
+        .pending_for_test()
+        .into_iter()
+        .find(|((_, name), _)| name == &key)
+        .expect("counter has a pending save");
+    spawner.despawn(&f.server, &d);
+    store.enable_for_test(vec![saved.expect("counter was saved")]);
+    let d = spawner.spawn(&f.server, 0).expect("restored counter");
+    assert_eq!(group(&d), 19752);
+    assert_eq!(d.data().phase.interaction_counts.get(&15994), Some(&4));
+    contributions.0.store(6, Ordering::Relaxed);
+    for _ in 0..5 {
+        use_counter(&d);
+        assert_eq!(group(&d), 19752);
+    }
+    use_counter(&d);
+    assert_eq!(group(&d), 19755);
+    assert_eq!(contributions.0.load(Ordering::Relaxed), 0);
+    assert!(d.data().phase.interaction_counts.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_COMPACT_DB"]
+async fn real_data_placement_mall_workbench_initial_group() {
+    let mut f = fx(Builder {
+        data: harvest_audit_data(),
+        ..Default::default()
+    });
+    let text = include_str!("../../../../app/Data/Worlds/arche_mall_world/doodad_spawns.json");
+    let mut def = parse_list(text, DoodadSpawnerDef::from_json)
+        .unwrap()
+        .into_iter()
+        .find(|def| def.base.id == 1399)
+        .expect("Fellowship Workbench placement");
+    assert_eq!(def.base.unit_id, 7701);
+    def.base.position = WorldSpawnPosition {
+        x: 120.0,
+        y: 130.0,
+        z: 100.0,
+        ..Default::default()
+    };
+    let spawner = Arc::new(DoodadSpawner::new(def, Some(0)));
+    let d = spawner.spawn(&f.server, 0).expect("spawns");
+    assert_eq!(group(&d), 22066);
+    let (_, body) = f
+        .client
+        .drain()
+        .into_iter()
+        .find(|(opcode, _)| *opcode == sc::SCDoodadCreatedPacket)
+        .expect("first creation packet");
+    assert_eq!(u32::from_le_bytes(body[34..38].try_into().unwrap()), 22066);
+    spawner.despawn(&f.server, &d);
+    let d = spawner.spawn(&f.server, 0).expect("respawns");
+    assert_eq!(group(&d), 22066);
+
+    spawner.despawn(&f.server, &d);
+    let d = spawner
+        .event_copy(0)
+        .spawn(&f.server, 0)
+        .expect("fresh event placement");
+    assert_eq!(group(&d), 22066);
+
+    let foreign = r#"[{"UnitId":7701,"funcGroupId":1490,"Position":{"X":120,"Y":130,"Z":100}}]"#;
+    let def = parse_list(foreign, DoodadSpawnerDef::from_json)
+        .unwrap()
+        .remove(0);
+    let d = Arc::new(DoodadSpawner::new(def, Some(0)))
+        .spawn(&f.server, 0)
+        .expect("spawns with fallback group");
+    assert_eq!(group(&d), 21218);
 }

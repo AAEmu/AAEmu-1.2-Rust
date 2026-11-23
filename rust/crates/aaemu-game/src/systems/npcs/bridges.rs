@@ -611,6 +611,8 @@ pub(crate) fn interaction_effect(
         Target::Obj(o) => Some(o.clone()),
         Target::Pos(_) => None,
     };
+    let doodad = target.as_ref().and_then(WorldObject::as_doodad);
+    let phase_before = doodad.map_or(0, |doodad| doodad.data().func_group_id);
     if let Some(skill) = args.source.skill() {
         // `MagicalEnchant` reads the `SkillItem` caster (the lunastone) and the
         // `SkillCastItemTarget` (the item to enchant); the other classes ignore them.
@@ -666,15 +668,23 @@ pub(crate) fn interaction_effect(
     if character.data().skill_char.skill_cancelled {
         return;
     }
-    if let Some(d) = target.as_ref().and_then(WorldObject::as_doodad) {
-        let template_id = d.data().template_id;
-        crate::systems::quests::events::on_doodad_interaction(
-            server,
-            character,
-            character,
-            template_id,
-        );
-    }
+    let (template_id, phase) = doodad.map_or((0, 0), |doodad| {
+        let d = doodad.data();
+        let entered_phase = if d.func_group_id != phase_before {
+            d.func_group_id
+        } else {
+            0
+        };
+        (d.template_id, entered_phase)
+    });
+    crate::systems::quests::events::on_world_interaction(
+        server,
+        character,
+        character,
+        template_id,
+        world_interaction,
+        phase,
+    );
 }
 
 /// `SpawnEffect.Apply` (the NPC owner type; slaves are the vehicles subsystem's).

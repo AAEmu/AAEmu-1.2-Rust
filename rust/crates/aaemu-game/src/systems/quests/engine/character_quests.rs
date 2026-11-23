@@ -5,7 +5,50 @@ use super::{
     SCQuestContextUpdatedPacket, SCQuestUnitReqFailedPacket, StartRefusal, WIRE_QUEST_ID_LIMIT,
 };
 
+const DAILY_DETAILS: [u32; 4] = [
+    detail::DAILY,
+    detail::DAILY_GROUP,
+    detail::DAILY_HUNT,
+    detail::DAILY_LIVELIHOOD,
+];
+
 impl<'a> Ctx<'a> {
+    /// r208022 0x7e5920 counts each daily context once when tracked or completed.
+    fn daily_quota_reached(&self) -> bool {
+        let limit = self.server.config.get().quest.daily_limit;
+        if limit == 0 {
+            return false;
+        }
+
+        let is_daily = |id| {
+            self.data
+                .template(id)
+                .is_some_and(|t| DAILY_DETAILS.contains(&t.detail_id))
+        };
+        let active = self
+            .st
+            .active
+            .values()
+            .filter_map(|&h| self.quest(h))
+            .filter(|q| is_daily(q.template_id));
+        let completed = self
+            .c
+            .quests
+            .completed
+            .iter()
+            .flat_map(|block| {
+                (0..64).filter_map(move |bit| {
+                    bit_get(&block.body, bit).then_some(block.id * 64 + bit as u32)
+                })
+            })
+            .filter(|&id| is_daily(id) && !self.has_quest(id));
+        active
+            .map(|q| q.template_id)
+            .chain(completed)
+            .nth(limit - 1)
+            .is_some()
+    }
+
     // ----- CharacterQuests -----
 
     /// `HasQuest`.
@@ -94,6 +137,9 @@ impl<'a> Ctx<'a> {
         if !forcibly && self.has_quest_completed(quest_id) && !template.repeatable {
             return Some(StartRefusal::Completed);
         }
+        if !forcibly && DAILY_DETAILS.contains(&template.detail_id) && self.daily_quota_reached() {
+            return Some(StartRefusal::DailyQuota);
+        }
         None
     }
 
@@ -172,6 +218,15 @@ impl<'a> Ctx<'a> {
                                 value: req.value1,
                             });
                         }
+                    }
+                }
+                StartRefusal::DailyQuota => {
+                    self.log_refusal("AddQuest", quest_id, "daily quest quota reached");
+                    if self.answer_start_refusals {
+                        self.send(SCQuestContextFailedPacket {
+                            quest_id,
+                            err: quest_error::DAILY_QUOTA,
+                        });
                     }
                 }
                 StartRefusal::Completed => {
@@ -360,7 +415,8 @@ impl<'a> Ctx<'a> {
     /// `CSRestartMainQuestPacket` (0x0fd): the player asked to restart a main quest. The 1.2
     /// client only sends it for an active quest whose status is not `Completed` and whose
     /// template `detail_id` is 2 (`FUN_3937b200` / `FUN_3937a8d0`), after its own 3 s
-    /// throttle. `restart_on_fail` is never read by the client; it is the inferred server gate
+    /// throttle. r208022 RVA 0x38a8d0 also totals supply labor before sending the request.
+    /// `restart_on_fail` is never read by the client; it is the inferred server gate
     /// (QUEST-1 in `PORTING.md`). The reply is a normal `SCQuestContextStartedPacket`, which
     /// the client turns into the `QUEST_CHAT_RESTART` bubble.
     pub fn try_restart_quest(&mut self, quest_id: u32) -> bool {
@@ -403,6 +459,22 @@ impl<'a> Ctx<'a> {
                 self.c.unit.name,
                 self.c.id
             );
+            return false;
+        }
+        let required_labor: i64 = template
+            .components_of(&self.data.components, kind::SUPPLY)
+            .into_iter()
+            .flat_map(|c| c.acts.iter())
+            .filter_map(|&a| match self.data.acts[a].kind {
+                ActKind::SupplyLp { labor_power } => Some(i64::from(labor_power)),
+                _ => None,
+            })
+            .sum();
+        if required_labor > 0 && i64::from(self.c.labor_power) < required_labor {
+            self.send(SCQuestContextFailedPacket {
+                quest_id,
+                err: quest_error::INSUFFICIENT_LABOR,
+            });
             return false;
         }
         let (acceptor_type, acceptor_id) = self
@@ -522,6 +594,10 @@ impl<'a> Ctx<'a> {
             self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
             return;
         }
+        if !self.valid_reward_choice(quest_id, selected) {
+            self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
+            return;
+        }
         if let Some(q) = self.quest_mut(h) {
             q.selected_reward_index = selected;
         }
@@ -598,11 +674,7 @@ impl<'a> Ctx<'a> {
                         let body = block.body8();
                         tracing::info!("QuestReset by {}, reset {quest_id}", self.c.unit.name);
                         if send_if_changed {
-                            self.send(SCQuestContextResetPacket {
-                                quest_id,
-                                body,
-                                component_id: block_id,
-                            });
+                            self.send(SCQuestContextResetPacket { quest_id, body });
                         }
                     }
                 }
@@ -612,15 +684,7 @@ impl<'a> Ctx<'a> {
 
     /// `ResetDailyQuests(sendPacketsIfChanged)`.
     pub fn reset_daily_quests(&mut self, send: bool) {
-        self.reset_quests(
-            &[
-                detail::DAILY,
-                detail::DAILY_GROUP,
-                detail::DAILY_HUNT,
-                detail::DAILY_LIVELIHOOD,
-            ],
-            send,
-        );
+        self.reset_quests(&DAILY_DETAILS, send);
     }
 
     /// `CheckDailyResetAtLogin` (UTC dates of now and `LeaveTime`).

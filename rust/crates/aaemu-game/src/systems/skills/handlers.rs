@@ -306,6 +306,16 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             .and_then(|world| world.object(obj_id))
             .and_then(|object| object.as_doodad().cloned())
         {
+            let doodad_data = &data.systems.npcs.doodad;
+            if !matches!(p.caster, SkillCaster::Mount { .. })
+                && player.core().is_climbing()
+                && doodad_data
+                    .func_for_skill(doodad.data().func_group_id, skill_id)
+                    .is_some_and(|func| doodad_data.forbids_climbing(func.func_key))
+            {
+                send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+                return;
+            }
             let run = super::skill::new_skill_for(server, skill.clone(), Some(&me));
             if crate::systems::npcs::doodad::occupancy::refuses_start(server, &doodad, &me, &run) {
                 tracing::debug!(
