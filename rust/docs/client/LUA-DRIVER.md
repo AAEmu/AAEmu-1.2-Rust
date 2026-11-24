@@ -1081,3 +1081,91 @@ Deployment:
   has to be rebuilt with
   `Scripts/build-client-distribution.ps1 -LauncherExe <supplied AAEmuLauncher.exe>`; an
   `AAEmuLauncher.exe` built earlier still carries the old driver without the option.
+
+## 15. Performance patch set
+
+`native/perfpatch.cpp` is a table of in-memory patches and hooks for the r208022 engine modules
+`CryPhysics.dll` (`0x543CB771`, `0x75B400`, VMProtect-packed on disk; checked in memory),
+`crysystem.dll` (timestamp `0x543CB856`, size `0x169000`) and `cryrenderd3d10.dll`
+(`0x543CB89C`, `0x549000`). Both builds of the driver (diagnostic and `AADRIVER_PLAYER`) carry
+it. Every site in `native/perfsites.h` is checked byte for byte before a write, and a mismatch
+refuses only that patch. No client file is changed, and x2game.dll is not touched.
+
+**Timing.** The launcher injects the driver into the suspended client. A loader notification
+wraps the loader entry point of each target module. The patches go in on the loading thread
+right after that module's DllMain returns, before any of its code runs on another thread.
+Late attachment through `aaemu-clientdriver inject` gives a different result. A module that is
+already running only gets one-byte patches and IAT swaps, and the multi-byte code changes refuse.
+
+| Id | Default | Change |
+|---|---|---|
+| `pak-readahead-64k` | on (`--no-fast-pak`, `--patch none` or `--no-patch` turns it off, also the older `fast pak` path) | Pack::Read read-ahead limit 1 MB -> 64 KB (crysystem `+0x14CC5`) |
+| `cpuspeed-sleep10` | on | CPU-speed probe `Sleep(100)` -> `Sleep(10)` (`+0x237B8`) |
+| `cpu-calibration-normal-priority` | follows `--smooth-start` (an explicit switch overrides it, also for the older start-up path) | section 9, now applied at the same early point |
+| `instancing-no-wc-readback` | on | instancing loop reads translations from the source matrix, not the write-combined vertex buffer (cryrenderd3d10 `+0x5DA45`, 71 bytes) |
+| `shader-async-poll-5ms` | on | async shader worker polls every 5 ms, not 25 ms (`+0x8DA26`) |
+| `dispmode-cache` | on | crysystem IAT `ChangeDisplaySettingsExA`: identical `CDS_TEST` queries answered from a cache |
+| `fast-splitpath` | on | crysystem IAT `_splitpath`: same results without a locale lookup per character |
+| `frame-latency` | off | `SetMaximumFrameLatency(frame_latency)` on the game device (`--frame-latency N`) |
+| `render-thread-event-sync` | off | both flush waits block on the flag (`WaitOnAddress`) instead of `SwitchToThread` spins |
+| `pak-catalog-scope` | off | times each pak catalogue load in `aadriver.log` |
+| `pak-findchild-index` | off | hash index for directory children during the catalogue load |
+| `pak-prefetch` | off | background read of the last `prefetch_mb` (96) MB of `game_pak` (cold cache) |
+| `diag-resources` | off | every `diag_interval_s` (60) s: handles, GDI/USER objects, private bytes, free and largest free address space |
+| `physics-role-guard` | on | CryPhysics crash fix (below): only the thread that steps the physics world holds iCaller 0 |
+| `diag-physics-role` | off | logs which threads step physics and hold iCaller 0; 2 ms role samples (`aaemu-clientdriver perf`) |
+| `diag-frame-trace` | off | main/render frame phases; stack samples of both threads while a frame is over `trace_budget_ms` (50), in `frametrace-<pid>.tsv` |
+| `diag-fulldump` | off | one full-memory dump next to the driver on the first access violation in CryPhysics or Cry3DEngine |
+
+The default-on rows are the six patches the r208022 dev client has applied in live runs, and
+`physics-role-guard`. `frame-latency 1` smooths a light scene (farm p99 20 -> 16 ms) but
+regresses CPU-bound crowds (300 players: p99 59 -> 103 ms), so it stays off.
+
+**CryPhysics guard.** CryPhysics keeps per-caller scratch buffers indexed by `iCaller`. That is
+0 for the physics thread and 4 for every other thread (locked). `TracePendingRays` (world vtable
+slot 44) starts with `MarkAsPhysThread`, which hands iCaller 0 to its caller without waiting for
+the previous owner. The main thread calls it every frame. Its slot-34 "unmark" hands the role
+back to the main thread's cell. Two threads then share the unlocked buffers: the
+`CryPhysics+0x1689BE`, `+0xAD1DB` and BV-tree crashes. The guard wraps slots 33, 34 and 44 in a
+heap copy of the world's vtable (`gEnv->pPhysicalWorld`); no CryPhysics byte changes, because
+the engine's protector rejects code changes there. `TracePendingRays` from any thread other than
+the stepping thread runs with its TLS and the role pointer parked on a private cell pair
+(iCaller 4). An unmark parks the role on an ownerless cell, so the next step takes it from
+nobody. Every path that can take the role holds one lock: the stepping thread's `TimeStep` with
+dt > 0 (its inline takes), its `TracePendingRays` and the unmark, and a parked call from the park
+to the restore. So the stepping thread can never take the role between a park and the engine's
+mark. `TracePendingRays` already write-locks the ray queue for its whole call, and the main thread
+does not call it while the physics thread steps, so the lock adds no measurable wait
+(`role_waits` in `aaemu-clientdriver perf`). Evidence: `C:\aa-re\notes\client-perf-r208022.md`.
+
+**Switches**, later wins: the table defaults, then `aadriver.ini` next to the DLL (`[perf]
+patches=...`), then `%AADRIVER_PATCHES%`, then `-aaemu-patches=` on the client command line. The
+syntax is comma-separated tokens applied in order: `ID` or `+ID`, `-ID`, `all`, `none`,
+`default`, `key=value`. The launcher builds the last source:
+
+```powershell
+aaemu-launcher ... --patch render-thread-event-sync,diag-resources --no-patch fast-splitpath
+aaemu-launcher ... --frame-latency 1 --min-time-step 0 --cvar-preset streaming
+aaemu-launcher ... --cvar e_view_dist_ratio_vegetation=20
+```
+
+CVars (`--cvar`, `--min-time-step`, `--cvar-preset streaming|view-near`, `[perf] cvars=`,
+`%AADRIVER_CVARS%`) are numeric only: a finite decimal number within +-1e9, written into the Lua
+chunk in canonical form. A bad entry is logged and dropped; the others stay. They are set once at the first script tick through
+`System.SetCVar`, and `aadriver.log` records old and new values. The game can save CVars it owns
+into `system.cfg`.
+
+**Status.** `aadriver.log` lists every id as `applied`, `present` (already in place), `refused`
+with the reason, or `off`. The first script tick writes the same summary into `ArcheAge.log`
+(`[aadriver] perf patches: ...`). Use `aaemu-clientdriver perf` (pipe op `Q`) for a running
+client.
+
+**Tests.** `native/build.bat` builds and runs `perf-selftest.exe`. It checks the patterns and
+switches, compares the `_splitpath` replacement with the CRT (including code page 932), checks
+the child index against a linear search, and runs the flush waits, jump hooks and the whole
+per-module apply path on synthetic module images. `perf-sites.exe <client>\bin32`, or
+`AADRIVER_VERIFY_BIN32` during the build, checks every site, IAT slot and redirected operand
+against the client files on disk. CryPhysics is packed on disk: its rows are checked against an
+in-memory image when `AADRIVER_VERIFY_DUMP` names a folder with `r208022_CryPhysics.dll` (for
+example the dev client's `module_dump`), and at run time otherwise. The executables have no "patch" in their names, because
+Windows installer detection would otherwise ask for elevation.

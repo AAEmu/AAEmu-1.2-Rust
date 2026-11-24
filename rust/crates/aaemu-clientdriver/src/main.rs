@@ -187,6 +187,10 @@ fn run() -> anyhow::Result<()> {
             let mut d = Driver::connect(resolve_pid(&a)?, Duration::from_secs(5))?;
             print_reply(d.send(&Request::PakIo(action.into()))?)
         }
+        "perf" => {
+            let mut d = Driver::connect(resolve_pid(&a)?, Duration::from_secs(5))?;
+            print_reply(d.send(&Request::PerfPatches("status".into()))?)
+        }
         "screenshot" => {
             let path = a
                 .rest

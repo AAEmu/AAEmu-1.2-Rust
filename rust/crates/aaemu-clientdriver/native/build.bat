@@ -18,9 +18,9 @@ if errorlevel 1 ( echo [!] auction UI resource build failed & exit /b 1 )
 rc /nologo /I "%~dp0." /fo "%AADRIVER_OUT%\quest_map_ui.res" "%~dp0quest_map_ui.rc"
 if errorlevel 1 ( echo [!] quest map UI resource build failed & exit /b 1 )
 if "%AADRIVER_PLAYER%"=="1" (
-  cl /nologo /O2 /MT /EHsc /W4 /DAADRIVER_PLAYER /LD "%~dp0aadriver.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" "%AADRIVER_OUT%\quest_map_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO kernel32.lib shell32.lib
+  cl /nologo /O2 /MT /EHsc /W4 /DAADRIVER_PLAYER /LD "%~dp0aadriver.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0perfpatch.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" "%AADRIVER_OUT%\quest_map_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO kernel32.lib shell32.lib
 ) else (
-  cl /nologo /O2 /MT /EHsc /W4 /LD "%~dp0aadriver.cpp" "%~dp0visuals.cpp" "%~dp0skilltrace.cpp" "%~dp0video.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0input.cpp" "%~dp0audio.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" "%AADRIVER_OUT%\quest_map_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO user32.lib kernel32.lib d3d11.lib dxgi.lib gdiplus.lib ole32.lib shell32.lib
+  cl /nologo /O2 /MT /EHsc /W4 /LD "%~dp0aadriver.cpp" "%~dp0visuals.cpp" "%~dp0skilltrace.cpp" "%~dp0video.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0perfpatch.cpp" "%~dp0input.cpp" "%~dp0audio.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" "%AADRIVER_OUT%\quest_map_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO user32.lib kernel32.lib d3d11.lib dxgi.lib gdiplus.lib ole32.lib shell32.lib
 )
 if errorlevel 1 ( echo [!] driver build failed & exit /b 1 )
 cl /nologo /O2 /MT /EHsc /W4 "%~dp0startup-test.cpp" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\startup-test.exe" /link /NOLOGO kernel32.lib
@@ -48,6 +48,16 @@ cl /nologo /O2 /MT /EHsc /W4 "%~dp0virtualpak-test.cpp" /Fo"%AADRIVER_OUT%\\" /F
 if errorlevel 1 ( echo [!] virtual pak tests build failed & exit /b 1 )
 "%AADRIVER_OUT%\virtualpak-test.exe"
 if not "%errorlevel%"=="0" ( echo [!] virtual pak tests failed & exit /b 1 )
+cl /nologo /O2 /MT /EHsc /W4 "%~dp0perfpatch-test.cpp" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\perf-selftest.exe" /link /NOLOGO kernel32.lib
+if errorlevel 1 ( echo [!] perf patch tests build failed & exit /b 1 )
+"%AADRIVER_OUT%\perf-selftest.exe"
+if not "%errorlevel%"=="0" ( echo [!] perf patch tests failed & exit /b 1 )
+rem (No "patch" in exe names: Windows installer detection would ask for elevation.)
+rem Static check of every patch site against a client's bin32 (AADRIVER_VERIFY_BIN32); skipped when unset.
+cl /nologo /O2 /MT /EHsc /W4 "%~dp0perfpatch-verify.cpp" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\perf-sites.exe" /link /NOLOGO kernel32.lib
+if errorlevel 1 ( echo [!] perf patch verifier build failed & exit /b 1 )
+"%AADRIVER_OUT%\perf-sites.exe"
+if not "%errorlevel%"=="0" ( echo [!] perf patch sites differ from the client in AADRIVER_VERIFY_BIN32 & exit /b 1 )
 cl /nologo /O2 /MT /W3 "%~dp0aainject.cpp" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aainject.exe" /link /NOLOGO kernel32.lib
 if errorlevel 1 ( echo [!] injector build failed & exit /b 1 )
 echo [ok] %AADRIVER_OUT%\aadriver.dll

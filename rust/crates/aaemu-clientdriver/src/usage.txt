@@ -7,6 +7,7 @@ aaemu-clientdriver: run Lua inside a running ArcheAge 1.2 client
   window [--pid N] show|hide        control window visibility without minimising the renderer
   pak [--pid N] ACTION              optimize (64 KB read-ahead), baseline (1 MB), profile,
                                     status (JSON), trace (CSV), off or verify (engine byte parity)
+  perf [--pid N]                    performance patch status: one line per patch id (state, reason)
   mcp [options]                    serve local newline-delimited JSON-RPC on stdin/stdout
                                     --dll PATH --launcher PATH --client PATH --password-file PATH
                                     --login HOST:PORT --user NAME --artifact-dir DIR

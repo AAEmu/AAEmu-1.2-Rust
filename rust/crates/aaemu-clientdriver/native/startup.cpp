@@ -7,7 +7,7 @@
 
 namespace startup {
 static BYTE* base;
-static bool applied;
+static volatile bool applied;
 static const DWORD processImmediate = 0x23776;
 static const DWORD threadImmediate = 0x2378A;
 // CrySystem RVA 23740: saved priorities -> push REALTIME_PRIORITY_CLASS ->
@@ -51,15 +51,36 @@ static bool exchange(BYTE* b, bool smooth) {
     return ok;
 }
 
-bool install() {
+// Both immediates already hold the normal priorities (an earlier install through the other path).
+static bool smooth(BYTE* b) {
+    BYTE copy[sizeof(expected)];
+    memcpy(copy, b + processImmediate - 1, sizeof(copy));
+    if (*reinterpret_cast<SHORT*>(copy + 1) != 0x0020 || copy[threadImmediate - processImmediate + 1] != 0) return false;
+    *reinterpret_cast<SHORT*>(copy + 1) = 0x0100; copy[threadImmediate - processImmediate + 1] = 0x0f;
+    DWORD relocation = (DWORD)b - 0x36500000;
+    DWORD processSlot = 0x36608734 + relocation, threadSlot = 0x36608738 + relocation;
+    if (memcmp(copy + 13, &processSlot, 4) || memcmp(copy + 27, &threadSlot, 4)) return false;
+    memcpy(copy + 13, expected + 13, 4); memcpy(copy + 27, expected + 27, 4);
+    return memcmp(copy, expected, sizeof(copy)) == 0;
+}
+
+// No loader calls: perfpatch calls this under its lock, right after crysystem's DllMain returned.
+bool install_at(BYTE* b) {
     if (applied) return true;
-    BYTE* b = reinterpret_cast<BYTE*>(GetModuleHandleW(L"CrySystem.dll"));
     if (!b) return false;
     auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(b + reinterpret_cast<IMAGE_DOS_HEADER*>(b)->e_lfanew);
-    if (nt->FileHeader.TimeDateStamp != 0x543CB856 || nt->OptionalHeader.SizeOfImage != 0x169000 || !matches(b)) return false;
-    if (!exchange(b, true)) return false;
+    if (nt->FileHeader.TimeDateStamp != 0x543CB856 || nt->OptionalHeader.SizeOfImage != 0x169000) return false;
+    if (!smooth(b)) {
+        if (!matches(b)) return false;
+        if (!exchange(b, true) && !smooth(b)) return false;
+    }
     base = b; applied = true;
     return true;
+}
+
+bool install() {
+    if (applied) return true;
+    return install_at(reinterpret_cast<BYTE*>(GetModuleHandleW(L"CrySystem.dll")));
 }
 
 void remove() {
