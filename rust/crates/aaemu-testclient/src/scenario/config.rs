@@ -211,11 +211,37 @@ pub struct BotConfig {
     /// `busy`: seconds of the activity loop.
     #[serde(default = "default_busy_secs")]
     pub busy_secs: u64,
+    /// Optional fixed scene center for a local GM load test. Each bot uses a
+    /// deterministic offset within 25 m. The default retains the eight-point route.
+    #[serde(default)]
+    pub busy_center: Option<(f32, f32, f32)>,
+    /// Skip rowboat setup for the land-only crowd workload.
+    #[serde(default)]
+    pub busy_skip_boat: bool,
+    /// Character race override for newly created load-test characters.
+    #[serde(default)]
+    pub character_race: Option<u8>,
     /// `busy`: boat summon item (15817: Rowboat scroll, slave 15) and its use skill (15802).
     #[serde(default = "default_busy_boat_item")]
     pub busy_boat_item: u32,
     #[serde(default = "default_busy_boat_skill")]
     pub busy_boat_skill: u32,
+    /// `busy`: only every Nth bot summons a boat (the others swim at the sea point); 0 and 1
+    /// mean every bot.
+    #[serde(default)]
+    pub busy_boat_every: u32,
+    /// `busy`: steer the summoned boat in a slow circle every tick (`CSMoveUnitPacket` for the
+    /// slave), so the scene has moving hulls and wakes.
+    #[serde(default)]
+    pub busy_boat_move: bool,
+    /// `busy`: an effect item (for example a firework, 15591 green / 15594 red / 15595 blue /
+    /// 15863 dragon) used every tick on the bot itself through its use skill
+    /// (`busy_effect_skill`, the item's `use_skill_id`); 0 = off. A stack is added with
+    /// `/item add` during setup.
+    #[serde(default)]
+    pub busy_effect_item: u32,
+    #[serde(default)]
+    pub busy_effect_skill: u32,
 }
 
 /// The client packet that asks a stablehand to revive the dead mate. The real protocol is still

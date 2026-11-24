@@ -83,9 +83,16 @@ pub async fn run(
         let mut cfg = base.clone();
         cfg.user = format!("{prefix}{i}");
         cfg.character = format!("{prefix}{i}");
+        if kind == Kind::Busy && cfg.busy_center.is_some() && cfg.character_race.is_none() {
+            // Playable races in the r208022 CharTemplates.json.
+            cfg.character_race = Some([1, 4, 5, 6][i % 4]);
+        }
         tasks.push(tokio::spawn(async move {
             let rec = Recorder::new(false);
             let o: Outcome = scenario::run(kind, &cfg, &rec).await;
+            if kind == Kind::Busy && cfg.busy_center.is_some() {
+                println!("busy finished {}", cfg.user);
+            }
             (cfg.user, o)
         }));
         tokio::time::sleep(ramp).await;

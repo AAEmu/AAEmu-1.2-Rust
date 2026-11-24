@@ -486,7 +486,12 @@ async fn run_inner(
 
     let s = r.begin("game.create");
     let created = if cfg.create_new_character || game.state.characters.is_empty() {
-        game.create_character(&cfg.character).await?;
+        if let Some(race) = cfg.character_race {
+            game.create_character_with_race(&cfg.character, race)
+                .await?;
+        } else {
+            game.create_character(&cfg.character).await?;
+        }
         let p = game
             .wait_for("character creation result", |p| {
                 p.is_sc(sc::SCCreateCharacterResponsePacket)
