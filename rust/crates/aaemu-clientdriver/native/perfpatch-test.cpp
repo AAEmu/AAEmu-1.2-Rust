@@ -414,10 +414,12 @@ static void test_resources_line() {
 
 // ---- physics-role-guard: engine MarkAsPhysThread semantics on a fake CryPhysics image ----------
 static BYTE* g_fakePhys;
-static HANDLE g_ownerReady, g_ownerGo, g_ownerDone;
+static HANDLE g_ownerReady, g_ownerGo, g_ownerDone, g_ownerBlocked;
 static volatile LONG g_ownerQuit;
 static int g_ownerSaw = -1;
-// The engine's MarkAsPhysThread(1) (0x350827D0), with the cell base of the fake image.
+static DWORD g_interfered;
+// The engine's MarkAsPhysThread(1) (0x350827D0) and TimeStep's inline takes (+0xAFB3D, +0xB01C6),
+// with the cell base of the fake image: on a TLS/cur mismatch, move the role to partner(cur).
 static void fake_mark(BYTE* base) {
     DWORD idx = *(DWORD*)(base + kPhysTlsIndex);
     void** cur = (void**)(base + kPhysRoleCurrent);
@@ -429,13 +431,28 @@ static void fake_mark(BYTE* base) {
     }
 }
 static int fake_icaller(BYTE* base) { void* p = TlsGetValue(*(DWORD*)(base + kPhysTlsIndex)); return p ? *(LONG*)p : 4; }
-// TracePendingRays: MarkAsPhysThread(1), then use iCaller; arg 7 lets the owner step meanwhile.
+static volatile LONG g_ownerCmd;       // 0 TimeStep(dt > 0) through the guard, 1 unmark through the guard, 2 TracePendingRays through the guard
+// Starts an owner role path while this thread is inside a guarded call and waits until the owner
+// either blocks on the role lock (serialised) or has finished (it ran inside the parked window).
+static void interfere(LONG cmd) {
+    g_ownerCmd = cmd; g_ownerSaw = -1; SetEvent(g_ownerGo);
+    HANDLE h[2] = { g_ownerBlocked, g_ownerDone };
+    g_interfered = WaitForMultipleObjects(2, h, FALSE, 5000);
+}
+// TracePendingRays: MarkAsPhysThread(1), then use iCaller.
+//   arg 7: the owner steps after the mark, while this call's query still runs (it must keep iCaller 4);
+//   arg 8: the owner steps after the park but before the mark (the reviewed window);
+//   arg 9: the owner's own TracePendingRays takes the role in that window.
 static int __fastcall fake_trace_rays(void*, void*, int arg) {
+    if (arg == 8) interfere(0);
+    if (arg == 9) interfere(2);
     fake_mark(g_fakePhys);
     int me = fake_icaller(g_fakePhys);
-    if (arg == 7) { SetEvent(g_ownerGo); WaitForSingleObject(g_ownerDone, 5000); }
+    if (arg == 7) { interfere(0); if (fake_icaller(g_fakePhys) != me) me = -50; }
     return 100 + me;
 }
+// TimeStep: the inline take when dt > 0.
+static void __fastcall fake_step(void*, void*, float dt, int) { if (dt > 0) fake_mark(g_fakePhys); }
 // The engine's unmark (world slot 34, 0x35088520): hand the caller's role to the partner cell.
 static void __fastcall fake_unmark(void*, void*) {
     BYTE* base = g_fakePhys;
@@ -445,8 +462,8 @@ static void __fastcall fake_unmark(void*, void*) {
     LONG* mine = (LONG*)TlsGetValue(idx);
     if (mine == *cur) { LONG* other = (LONG*)(x + (((uintptr_t)mine - x) ^ 4)); *mine = 4; *cur = other; *other = 0; TlsSetValue(idx, nullptr); }
 }
-static volatile LONG g_ownerCmd;       // 0 mark (a step), 1 unmark through the guard, 2 TracePendingRays through the guard
 static volatile DWORD g_ownerTid;
+static void owner_blocked() { if (GetCurrentThreadId() == g_ownerTid) SetEvent(g_ownerBlocked); }
 static unsigned __stdcall owner_thread(void*) {
     LONG* cells = (LONG*)(g_fakePhys + kPhysRoleCells);
     TlsSetValue(*(DWORD*)(g_fakePhys + kPhysTlsIndex), &cells[0]);
@@ -455,13 +472,14 @@ static unsigned __stdcall owner_thread(void*) {
     while (WaitForSingleObject(g_ownerGo, 5000) == WAIT_OBJECT_0 && !g_ownerQuit) {
         if (g_ownerCmd == 1) hk_unmark(nullptr, nullptr);
         else if (g_ownerCmd == 2) hk_trace_rays(nullptr, nullptr, 0);
-        else fake_mark(g_fakePhys);       // the owner's own step takes the role (TimeStep inline take)
+        else hk_timestep(nullptr, nullptr, 0.016f, 0);   // the owner's own step takes the role inline
         g_ownerSaw = fake_icaller(g_fakePhys);
         SetEvent(g_ownerDone);
     }
     return 0;
 }
 static void owner_do(LONG cmd) { g_ownerCmd = cmd; g_ownerSaw = -1; SetEvent(g_ownerGo); WaitForSingleObject(g_ownerDone, 5000); }
+static bool owner_finished() { return WaitForSingleObject(g_ownerDone, 5000) == WAIT_OBJECT_0; }
 static void test_physics_role_guard() {
     g_fakePhys = (BYTE*)VirtualAlloc(NULL, 0x220000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     DWORD idx = TlsAlloc();
@@ -470,39 +488,212 @@ static void test_physics_role_guard() {
     cells[0] = 0; cells[1] = 4;
     *(void**)(g_fakePhys + kPhysRoleCurrent) = &cells[0];
     g_physBase = g_fakePhys; g_raysOriginal = (RaysFn)(void*)&fake_trace_rays; g_unmarkOriginal = (VoidFn)(void*)&fake_unmark;
-    InitializeCriticalSection(&g_parkLock);
+    g_stepOriginal = (StepFn)(void*)&fake_step;
+    InitializeCriticalSection(&g_roleLock);
+    g_roleWaitHook = owner_blocked;
     g_ownerReady = CreateEventW(NULL, FALSE, FALSE, NULL); g_ownerGo = CreateEventW(NULL, FALSE, FALSE, NULL);
-    g_ownerDone = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g_ownerDone = CreateEventW(NULL, FALSE, FALSE, NULL); g_ownerBlocked = CreateEventW(NULL, FALSE, FALSE, NULL);
     HANDLE t = (HANDLE)_beginthreadex(NULL, 0, owner_thread, NULL, 0, NULL);
     WaitForSingleObject(g_ownerReady, 5000);
     g_stepper = g_ownerTid;              // the owner thread is the stepping (physics) thread
     void** cur = (void**)(g_fakePhys + kPhysRoleCurrent);
-    // 1. guarded: this thread runs as iCaller 4, the owner keeps the role and its cell
     g_roleGuard = true;
+    // 1. guarded: this thread runs as iCaller 4, the owner keeps the role and its cell
     CHECK(hk_trace_rays(nullptr, nullptr, 0) == 104);
     CHECK(*cur == &cells[0] && cells[0] == 0 && cells[1] == 4 && TlsGetValue(idx) == nullptr && g_guarded == 1);
-    // 2. the owner steps during the guarded call: it moves into the private pair and still sees 0
+    // 2. the owner steps after the mark: its step waits for the guarded call, whose query keeps iCaller 4
     CHECK(hk_trace_rays(nullptr, nullptr, 7) == 104);
-    CHECK(g_ownerSaw == 0 && g_guardMoved == 1 && *cur == (void*)&g_park[0][1] && g_park[0][1] == 0 && fake_icaller(g_fakePhys) == 4);
-    // 3. guarded again with the owner on the private pair: the other pair parks, the owner stays
-    CHECK(hk_trace_rays(nullptr, nullptr, 0) == 104);
-    CHECK(*cur == (void*)&g_park[0][1] && g_park[0][1] == 0 && g_guarded == 3 && TlsGetValue(idx) == nullptr);
-    // 4. the owner itself is never parked
+    CHECK(g_interfered == WAIT_OBJECT_0 && owner_finished() && g_ownerSaw == 0);
+    CHECK(*cur == &cells[0] && cells[0] == 0 && cells[1] == 4 && g_guardMoved == 0 && TlsGetValue(idx) == nullptr && g_roleWaits == 1);
+    // 3. the owner steps before the original's MarkAsPhysThread (after the park): it waits as well, so
+    //    the mark sees "already the owner" and the call still runs as iCaller 4 (unserialised, the owner
+    //    moved the park and the mark took the role back: iCaller 0 next to the owner's query)
+    CHECK(hk_trace_rays(nullptr, nullptr, 8) == 104);
+    CHECK(g_interfered == WAIT_OBJECT_0 && owner_finished() && g_ownerSaw == 0);
+    CHECK(*cur == &cells[0] && cells[0] == 0 && cells[1] == 4 && g_guardMoved == 0 && TlsGetValue(idx) == nullptr && g_roleWaits == 2);
+    CHECK(g_park[0][0] == 4 && g_park[0][1] == 4 && g_park[1][0] == 4 && g_park[1][1] == 4);
+    // 4. the owner itself is never parked, and without contention nothing waits
     owner_do(0);
-    CHECK(g_ownerSaw == 0 && *cur == (void*)&g_park[0][1]);
+    CHECK(g_ownerSaw == 0 && *cur == &cells[0]);
     owner_do(2);
-    CHECK(g_ownerSaw == 0 && *cur == (void*)&g_park[0][1]);
+    CHECK(g_ownerSaw == 0 && *cur == &cells[0] && g_roleWaits == 2);
     // 5. the owner unmarks: the role is parked ownerless instead of going to the partner cell
     owner_do(1);
-    CHECK(g_ownerSaw == 4 && *cur == (void*)&g_phantom[0] && g_phantom[0] == 0 && g_park[0][1] == 4 && g_unmarksParked == 1);
+    CHECK(g_ownerSaw == 4 && *cur == (void*)&g_phantom[0] && g_phantom[0] == 0 && cells[0] == 4 && cells[1] == 4 && g_unmarksParked == 1);
     CHECK(hk_trace_rays(nullptr, nullptr, 0) == 104 && *cur == (void*)&g_phantom[0]);   // not the stepper: parked
-    owner_do(2);                                                                          // the stepper takes it from nobody
-    CHECK(g_ownerSaw == 0 && *cur == (void*)&g_phantom[1] && g_phantom[0] == 4);
-    // 6. guard off: the engine behaviour, this thread takes iCaller 0 from the owner
+    // 6. the stepper's own TracePendingRays would take the ownerless role inside a parked call's window:
+    //    it waits, takes it afterwards, and the guarded call ran as iCaller 4
+    CHECK(hk_trace_rays(nullptr, nullptr, 9) == 104);
+    CHECK(g_interfered == WAIT_OBJECT_0 && owner_finished() && g_ownerSaw == 0);
+    CHECK(*cur == (void*)&g_phantom[1] && g_phantom[0] == 4 && g_phantom[1] == 0 && TlsGetValue(idx) == nullptr && g_guardMoved == 0);
+    // 7. a step with dt == 0 (the main thread's per-frame call) does not take the role or the lock
+    hk_timestep(nullptr, nullptr, 0.0f, 0);
+    CHECK(TlsGetValue(idx) == nullptr && *cur == (void*)&g_phantom[1] && g_stepper == g_ownerTid);
+    // 8. guard off: the engine behaviour, this thread takes iCaller 0 from the owner
     g_roleGuard = false;
     CHECK(hk_trace_rays(nullptr, nullptr, 0) == 100 && TlsGetValue(idx) == *cur && g_phantom[1] == 4);
     g_ownerQuit = 1; SetEvent(g_ownerGo); WaitForSingleObject(t, 5000); CloseHandle(t);
+    g_roleWaitHook = nullptr;
     TlsSetValue(idx, nullptr); TlsFree(idx);
+    std::string st = perfpatch::control("status");
+    CHECK(st.find("role_waits=3") != std::string::npos && st.find("guard_moved=0") != std::string::npos);
+}
+
+// ---- old start-up paths follow the resolved switches ---------------------------------------------
+static void resolve(const wchar_t* cmd, const char* ini = "", const char* env = "") {
+    resolve_switches(cmd, ini, env, perfcore::command_line_value(cmd, L"-aaemu-patches="));
+}
+static bool status_says(const char* id, const char* state) {
+    return perfpatch::control("status").find(std::string("\n") + id + " " + state) != std::string::npos ||
+           perfpatch::control("status").find(std::string("0") + id + " " + state) == 0;
+}
+static void test_switch_resolution() {
+    g_log = test_logger;
+    const char* pak = "pak-readahead-64k";
+    const char* cal = "cpu-calibration-normal-priority";
+    g_attached = false;
+    resolve(L"x.exe -aaemu-fast-pak -aaemu-smooth-start");
+    CHECK(!perfpatch::enabled(pak) && !perfpatch::enabled(cal));               // nothing before attach
+    g_attached = true;
+    // the launcher's default profile: both aliases on
+    resolve(L"x.exe -aaemu-fast-pak -aaemu-smooth-start");
+    CHECK(perfpatch::enabled(pak) && perfpatch::enabled(cal) && status_says(pak, "pending") && status_says(cal, "pending"));
+    // --patch none: both off, and the status says so
+    resolve(L"x.exe -aaemu-fast-pak -aaemu-smooth-start -aaemu-patches=none");
+    CHECK(!perfpatch::enabled(pak) && !perfpatch::enabled(cal) && status_says(pak, "off") && status_says(cal, "off"));
+    CHECK(!perfpatch::enabled("physics-role-guard") && !perfpatch::enabled("fast-splitpath"));
+    // --no-patch for one id leaves the other alias alone
+    resolve(L"x.exe -aaemu-fast-pak -aaemu-smooth-start -aaemu-patches=-pak-readahead-64k");
+    CHECK(!perfpatch::enabled(pak) && perfpatch::enabled(cal) && status_says(pak, "off"));
+    resolve(L"x.exe -aaemu-fast-pak -aaemu-smooth-start -aaemu-patches=-cpu-calibration-normal-priority");
+    CHECK(perfpatch::enabled(pak) && !perfpatch::enabled(cal) && status_says(cal, "off"));
+    // --no-fast-pak / --no-smooth-start: the launcher omits the aliases
+    resolve(L"x.exe -aaemu-hidden");
+    CHECK(!perfpatch::enabled(pak) && !perfpatch::enabled(cal));
+    // explicit ids win over a missing alias, and ini/env layer under the command line
+    resolve(L"x.exe -aaemu-hidden -aaemu-patches=pak-readahead-64k,+cpu-calibration-normal-priority");
+    CHECK(perfpatch::enabled(pak) && perfpatch::enabled(cal));
+    resolve(L"x.exe -aaemu-fast-pak -aaemu-smooth-start", "none");
+    CHECK(!perfpatch::enabled(pak) && !perfpatch::enabled(cal));
+    resolve(L"x.exe -aaemu-fast-pak -aaemu-smooth-start", "none", "pak-readahead-64k");
+    CHECK(perfpatch::enabled(pak) && !perfpatch::enabled(cal));
+    // a late inject (no launcher flags): the table defaults
+    resolve(L"x.exe");
+    CHECK(perfpatch::enabled(pak) && !perfpatch::enabled(cal) && perfpatch::enabled("physics-role-guard"));
+    // aadriver.cpp's start-up paths ask the resolved switches, not the raw flags
+    std::string src, here = __FILE__;
+    FILE* f = fopen((here.substr(0, here.find_last_of("\\/") + 1) + "aadriver.cpp").c_str(), "rb");
+    if (f) { char b[4096]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) src.append(b, n); fclose(f); }
+    CHECK(!src.empty());
+    CHECK(src.find("L\"-aaemu-fast-pak\"") == std::string::npos && src.find("L\"-aaemu-smooth-start\"") == std::string::npos);
+    CHECK(src.find("perfpatch::enabled(\"pak-readahead-64k\")") != std::string::npos &&
+          src.find("perfpatch::enabled(\"cpu-calibration-normal-priority\")") != std::string::npos);
+    resolve(L"x.exe -aaemu-fast-pak -aaemu-smooth-start");
+}
+
+// ---- CVar values: one bad entry is dropped, the rest stays, the chunk gets canonical numbers -------
+static bool canon(const char* in, const char* want) { std::string out; return perfcore::canonical_number(in, out) && out == want; }
+static bool rejected(const char* in) { std::string out; return !perfcore::canonical_number(in, out); }
+static void test_cvar_values() {
+    CHECK(canon("0", "0") && canon("20", "20") && canon("150", "150") && canon("-3", "-3"));
+    CHECK(canon("0.0066", "0.0066") && canon("0.1", "0.1") && canon("123456789.25", "123456789.25"));
+    CHECK(canon("+5", "5") && canon("-0", "0") && canon("1e3", "1000") && canon("1.5E-3", "0.0015"));
+    CHECK(canon(".5", "0.5") && canon("5.", "5") && canon("2.50", "2.5") && canon("1e-7", "1e-07"));
+    CHECK(canon("1000000000", "1000000000") && canon("-1e9", "-1000000000"));
+    for (const char* bad : { "", "-", "+", ".", "1.2.3", "1e", "e5", "1e+", "inf", "-inf", "nan", "NaN", "infinity", "0x10", "1,5",
+                             " 1", "1 ", "1e400", "-1e400", "1000000001", "1e10", "1..2", "--1", "1-", "5)", "0;os.exit()" })
+        CHECK(rejected(bad));
+    // the client may switch the CRT locale; the value keeps its decimal point
+    if (setlocale(LC_ALL, "de-DE")) { CHECK(canon("0.5", "0.5") && canon("1.25e2", "125")); setlocale(LC_ALL, "C"); }
+    g_log = test_logger; g_logLines.clear(); g_cvars.clear();
+    add_cvars("min_time_step:1.2.3;r_good:5;e_inf:inf;e_plus:+2;e_frac:0.25;noValue;e_big:1e12");
+    CHECK(g_cvars.size() == 3 && g_cvars[0].first == "r_good" && g_cvars[0].second == "5");
+    CHECK(g_cvars[1].first == "e_plus" && g_cvars[1].second == "2" && g_cvars[2].second == "0.25");
+    CHECK(logged("cvar 'min_time_step:1.2.3' ignored") && logged("cvar 'e_inf:inf' ignored") && logged("cvar 'noValue' ignored") && logged("cvar 'e_big:1e12' ignored"));
+    add_cvars("R_GOOD=7");                                // a later source replaces the value of the same name
+    CHECK(g_cvars.size() == 3 && g_cvars[0].second == "7");
+    g_tickStage = 0;
+    std::string lua = perfpatch::first_tick_lua("");
+    CHECK(lua.find("local n, v = 'r_good', 7\n") != std::string::npos && lua.find("local n, v = 'e_plus', 2\n") != std::string::npos);
+    CHECK(lua.find("local n, v = 'e_frac', 0.25\n") != std::string::npos && lua.find("1.2.3") == std::string::npos && lua.find("inf") == std::string::npos);
+    g_tickStage = 0; g_cvars.clear();
+}
+
+// ---- PE mapping (perf-sites.exe): damaged files are reported, never read out of bounds ----------
+struct PeFixture {
+    std::vector<uint8_t> f;
+    IMAGE_DOS_HEADER* dos() { return (IMAGE_DOS_HEADER*)f.data(); }
+    IMAGE_NT_HEADERS32* nt() { return (IMAGE_NT_HEADERS32*)(f.data() + 0x80); }
+    IMAGE_SECTION_HEADER* sec() { return (IMAGE_SECTION_HEADER*)(f.data() + 0x80 + sizeof(IMAGE_NT_HEADERS32)); }
+};
+// headers 0x400, one section: VA 0x1000, raw 0x400..0x600 (an import table), SizeOfImage 0x3000
+static PeFixture pe_fixture() {
+    PeFixture p; p.f.assign(0x600, 0);
+    p.dos()->e_magic = IMAGE_DOS_SIGNATURE; p.dos()->e_lfanew = 0x80;
+    IMAGE_NT_HEADERS32* nt = p.nt();
+    nt->Signature = IMAGE_NT_SIGNATURE; nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386; nt->FileHeader.NumberOfSections = 1;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER32); nt->FileHeader.TimeDateStamp = 0x12345678;
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC; nt->OptionalHeader.ImageBase = 0x10000000;
+    nt->OptionalHeader.SizeOfImage = 0x3000; nt->OptionalHeader.SizeOfHeaders = 0x400;
+    nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = 0x1000;
+    IMAGE_SECTION_HEADER* s = p.sec();
+    memcpy(s->Name, ".idata", 6); s->VirtualAddress = 0x1000; s->Misc.VirtualSize = 0x200; s->PointerToRawData = 0x400; s->SizeOfRawData = 0x200;
+    uint8_t* d = p.f.data() + 0x400;                      // file offset of RVA 0x1000
+    IMAGE_IMPORT_DESCRIPTOR desc = {}; desc.OriginalFirstThunk = 0x1100; desc.Name = 0x1180; desc.FirstThunk = 0x1140;
+    memcpy(d, &desc, sizeof desc);
+    uint32_t hint = 0x11A0; memcpy(d + 0x100, &hint, 4); memcpy(d + 0x140, &hint, 4);
+    strcpy((char*)d + 0x180, "KERNEL32.dll"); strcpy((char*)d + 0x1A2, "Sleep");
+    return p;
+}
+static bool pe_ok(PeFixture& p, perfcore::PeImage& img) { std::string why; return perfcore::map_pe(p.f.data(), p.f.size(), img, why); }
+static bool pe_bad(PeFixture p, const char* reason) {
+    perfcore::PeImage img; std::string why;
+    bool ok = perfcore::map_pe(p.f.data(), p.f.size(), img, why);
+    return !ok && img.mem.empty() && why.find(reason) != std::string::npos;
+}
+static void test_pe_mapping() {
+    PeFixture p = pe_fixture();
+    perfcore::PeImage img;
+    CHECK(pe_ok(p, img) && img.size == 0x3000 && img.mem.size() == 0x3000 && img.stamp == 0x12345678 && img.base == 0x10000000);
+    CHECK(perfcore::pe_import_at(img, 0x1140) == "KERNEL32.dll!Sleep" && perfcore::pe_import_at(img, 0x1144).empty());
+    // every truncation of the file is reported (the section's raw data ends at 0x600)
+    for (size_t n = 0; n < p.f.size(); ++n) {
+        perfcore::PeImage t; std::string why;
+        CHECK(!perfcore::map_pe(p.f.data(), n, t, why) && !why.empty());
+    }
+    { PeFixture q = p; q.dos()->e_magic = 0; CHECK(pe_bad(q, "MZ")); }
+    { PeFixture q = p; q.dos()->e_lfanew = 0x7FFFFFF0; CHECK(pe_bad(q, "e_lfanew")); }
+    { PeFixture q = p; q.dos()->e_lfanew = -4; CHECK(pe_bad(q, "e_lfanew")); }
+    { PeFixture q = p; q.dos()->e_lfanew = 0x600 - 8; CHECK(pe_bad(q, "e_lfanew")); }
+    { PeFixture q = p; q.nt()->Signature = 0; CHECK(pe_bad(q, "32-bit PE")); }
+    { PeFixture q = p; q.nt()->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC; CHECK(pe_bad(q, "32-bit PE")); }
+    { PeFixture q = p; q.nt()->FileHeader.SizeOfOptionalHeader = 8; CHECK(pe_bad(q, "optional header")); }
+    { PeFixture q = p; q.nt()->OptionalHeader.SizeOfImage = 0xFFFFFFFF; CHECK(pe_bad(q, "SizeOfImage")); }
+    { PeFixture q = p; q.nt()->OptionalHeader.SizeOfImage = 0; CHECK(pe_bad(q, "SizeOfImage")); }
+    { PeFixture q = p; q.nt()->OptionalHeader.SizeOfHeaders = 0x601; CHECK(pe_bad(q, "SizeOfHeaders")); }
+    { PeFixture q = p; q.nt()->OptionalHeader.SizeOfImage = 0x200; CHECK(pe_bad(q, "SizeOfHeaders")); }
+    { PeFixture q = p; q.nt()->FileHeader.NumberOfSections = 0xFFFF; CHECK(pe_bad(q, "section table")); }
+    { PeFixture q = p; q.nt()->FileHeader.SizeOfOptionalHeader = 0xFFFF; CHECK(pe_bad(q, "section table")); }
+    { PeFixture q = p; q.sec()->PointerToRawData = 0xFFFFFF00; CHECK(pe_bad(q, "raw data outside")); }
+    { PeFixture q = p; q.sec()->SizeOfRawData = 0xFFFFFFFF; CHECK(pe_bad(q, "raw data outside")); }
+    { PeFixture q = p; q.sec()->PointerToRawData = 0x500; CHECK(pe_bad(q, "raw data outside")); }
+    { PeFixture q = p; q.sec()->VirtualAddress = 0x3000; CHECK(pe_bad(q, "outside SizeOfImage")); }
+    { PeFixture q = p; q.sec()->VirtualAddress = 0xFFFFF000; CHECK(pe_bad(q, "outside SizeOfImage")); }
+    // raw data that runs past the image end is padding: copied up to SizeOfImage only
+    { PeFixture q = p; q.sec()->VirtualAddress = 0x2F00; perfcore::PeImage t; CHECK(pe_ok(q, t) && t.mem.size() == 0x3000 && t.mem[0x2F00 + 0x180] == 0); }
+    // a damaged import table gives "" instead of reading outside the image
+    { PeFixture q = p; q.nt()->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = 0x2FF8;
+      perfcore::PeImage t; CHECK(pe_ok(q, t) && perfcore::pe_import_at(t, 0x1140).empty()); }
+    { PeFixture q = p; q.nt()->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = 0xFFFFFFF0;
+      perfcore::PeImage t; CHECK(pe_ok(q, t) && perfcore::pe_import_at(t, 0x1140).empty()); }
+    { PeFixture q = p; IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)(q.f.data() + 0x400); d->OriginalFirstThunk = 0x2FFE;
+      perfcore::PeImage t; CHECK(pe_ok(q, t) && perfcore::pe_import_at(t, 0x1140).empty()); }
+    { PeFixture q = p; uint32_t beyond = 0x7FFFFFF0; memcpy(q.f.data() + 0x500, &beyond, 4);
+      perfcore::PeImage t; CHECK(pe_ok(q, t) && perfcore::pe_import_at(t, 0x1140) == "KERNEL32.dll!"); }
+    { PeFixture q = p; memset(q.f.data() + 0x580, 'A', 0x80);   // names without their NUL run on to the zero image tail
+      perfcore::PeImage t; CHECK(pe_ok(q, t) && perfcore::pe_import_at(t, 0x1140).find("AAAA") == 0); }
+    { perfcore::PeImage empty; CHECK(perfcore::pe_import_at(empty, 0x1140).empty() && perfcore::pe_string(empty, 0).empty()); }
+    { perfcore::PeImage tail; tail.mem = { 0x61, 0x62, 0x63 }; CHECK(perfcore::pe_string(tail, 0).empty() && perfcore::pe_string(tail, 3).empty()); }
 }
 
 int main() {
@@ -518,7 +709,10 @@ int main() {
     test_first_tick();
     test_resources_line();
     test_physics_role_guard();
+    test_switch_resolution();
+    test_cvar_values();
+    test_pe_mapping();
     if (g_failures) { fprintf(stderr, "%d perfpatch check(s) failed\n", g_failures); return 1; }
-    puts("perfpatch patterns, switches, splitpath, mode key, child index, waits, hooks, apply path, first tick and physics role guard passed");
+    puts("perfpatch patterns, switches, splitpath, mode key, child index, waits, hooks, apply path, first tick, physics role guard, switch resolution, CVar values and PE mapping passed");
     return 0;
 }

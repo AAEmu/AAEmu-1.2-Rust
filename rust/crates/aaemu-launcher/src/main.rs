@@ -32,8 +32,10 @@ aaemu-launcher: start the ArcheAge 1.2 (Trion) client with a launcher ticket
   --sound                enable client sound and music (silent by default)
   --no-sound             disable client sound and music
   --fast-start           skip the timed login logo stages (enabled by default)
-  --fast-pak             use 64 KB pak read-ahead (enabled by default)
-  --smooth-start         normal-priority CPU clock calibration (enabled by default)
+  --fast-pak             use 64 KB pak read-ahead (enabled by default; the default of patch
+                         pak-readahead-64k, so --patch none or --no-patch turns it off)
+  --smooth-start         normal-priority CPU clock calibration (enabled by default; the default of
+                         patch cpu-calibration-normal-priority, which --patch overrides)
   --no-fast-start        use the original timed login logo stages
   --no-fast-pak          use the original 1 MB pak read-ahead
   --no-smooth-start      use the original CPU clock calibration priorities
@@ -43,7 +45,8 @@ aaemu-launcher: start the ArcheAge 1.2 (Trion) client with a launcher ticket
   --no-patch ID          turn one patch off (same as --patch -ID)
   --frame-latency N      at most N queued frames (DXGI SetMaximumFrameLatency, 1..16)
   --min-time-step SECS   CVar min_time_step (built-in frame limiter; 0 = off, default 1/150 s)
-  --cvar NAME=VALUE      set a numeric CVar at the first script tick (repeatable)
+  --cvar NAME=VALUE      set a numeric CVar at the first script tick (repeatable; a finite
+                         decimal number within +-1e9)
   --cvar-preset NAME     streaming | view-near (CVar groups; untested defaults, see the patch README)
   --hidden               render in a hidden 1280x720 DX10 window (needs the driver)
   --multi-client         accept this client's built-in confirmation for another instance
@@ -114,8 +117,16 @@ fn add_cvar(cli: &mut Cli, name: &str, value: &str) -> anyhow::Result<()> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         bail!("CVar name '{name}' may only use letters, digits and _");
     }
-    if value.parse::<f64>().is_err() {
-        bail!("CVar {name}: value '{value}' is not a number");
+    // The driver writes the value into a Lua chunk and accepts only plain decimal numbers.
+    let plain = value
+        .bytes()
+        .all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'-' | b'+' | b'e' | b'E'));
+    if !plain
+        || !value
+            .parse::<f64>()
+            .is_ok_and(|v| v.is_finite() && v.abs() <= 1e9)
+    {
+        bail!("CVar {name}: value '{value}' is not a finite decimal number within +-1e9");
     }
     cli.cvars.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
     cli.cvars.push((name.to_owned(), value.to_owned()));
@@ -590,6 +601,16 @@ mod tests {
             driver_switch_args(&cli),
             vec!["-aaemu-patches=-pak-readahead-64k,frame-latency,-fast-splitpath,-shader-async-poll-5ms,frame-latency,frame_latency=2"]
         );
+        // --patch none reaches the driver, which turns the profile aliases (-aaemu-fast-pak,
+        // -aaemu-smooth-start) off with everything else (native perfpatch-test switch resolution)
+        let cli = parse(&["--patch", "none"]).unwrap();
+        assert!(cli.fast_pak && cli.smooth_start);
+        assert_eq!(driver_switch_args(&cli), vec!["-aaemu-patches=none"]);
+        let cli = parse(&["--no-patch", "cpu-calibration-normal-priority"]).unwrap();
+        assert_eq!(
+            driver_switch_args(&cli),
+            vec!["-aaemu-patches=-cpu-calibration-normal-priority"]
+        );
         assert!(parse(&["--frame-latency", "0"]).is_err());
         assert!(parse(&["--patch", "a\"b"]).is_err());
         assert!(parse(&["--no-patch", "x y"]).is_err());
@@ -613,6 +634,16 @@ mod tests {
         assert!(parse(&["--cvar", "min_time_step=fast"]).is_err());
         assert!(parse(&["--cvar", "bad-name=1"]).is_err());
         assert!(parse(&["--cvar", "novalue"]).is_err());
+        for bad in [
+            "1.2.3", "inf", "NaN", "infinity", "1e10", "-2e9", "0x10", "1,5", "",
+        ] {
+            assert!(parse(&["--cvar", &format!("x={bad}")]).is_err(), "{bad}");
+        }
+        let cli = parse(&["--cvar", "x=+5", "--cvar", "y=1.5e-3", "--cvar", "z=-1e9"]).unwrap();
+        assert_eq!(
+            driver_switch_args(&cli),
+            vec!["-aaemu-cvars=x:+5;y:1.5e-3;z:-1e9"]
+        );
         assert!(parse(&["--cvar-preset", "ultra"]).is_err());
         assert!(USAGE.contains("--cvar-preset NAME"));
     }

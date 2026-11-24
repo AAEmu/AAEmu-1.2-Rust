@@ -1099,9 +1099,9 @@ already running only gets one-byte patches and IAT swaps, and the multi-byte cod
 
 | Id | Default | Change |
 |---|---|---|
-| `pak-readahead-64k` | on (`--no-fast-pak` turns it off) | Pack::Read read-ahead limit 1 MB -> 64 KB (crysystem `+0x14CC5`) |
+| `pak-readahead-64k` | on (`--no-fast-pak`, `--patch none` or `--no-patch` turns it off, also the older `fast pak` path) | Pack::Read read-ahead limit 1 MB -> 64 KB (crysystem `+0x14CC5`) |
 | `cpuspeed-sleep10` | on | CPU-speed probe `Sleep(100)` -> `Sleep(10)` (`+0x237B8`) |
-| `cpu-calibration-normal-priority` | follows `--smooth-start` | section 9, now applied at the same early point |
+| `cpu-calibration-normal-priority` | follows `--smooth-start` (an explicit switch overrides it, also for the older start-up path) | section 9, now applied at the same early point |
 | `instancing-no-wc-readback` | on | instancing loop reads translations from the source matrix, not the write-combined vertex buffer (cryrenderd3d10 `+0x5DA45`, 71 bytes) |
 | `shader-async-poll-5ms` | on | async shader worker polls every 5 ms, not 25 ms (`+0x8DA26`) |
 | `dispmode-cache` | on | crysystem IAT `ChangeDisplaySettingsExA`: identical `CDS_TEST` queries answered from a cache |
@@ -1131,7 +1131,12 @@ heap copy of the world's vtable (`gEnv->pPhysicalWorld`); no CryPhysics byte cha
 the engine's protector rejects code changes there. `TracePendingRays` from any thread other than
 the stepping thread runs with its TLS and the role pointer parked on a private cell pair
 (iCaller 4). An unmark parks the role on an ownerless cell, so the next step takes it from
-nobody. Evidence: `C:\aa-re\notes\client-perf-r208022.md`.
+nobody. Every path that can take the role holds one lock: the stepping thread's `TimeStep` with
+dt > 0 (its inline takes), its `TracePendingRays` and the unmark, and a parked call from the park
+to the restore. So the stepping thread can never take the role between a park and the engine's
+mark. `TracePendingRays` already write-locks the ray queue for its whole call, and the main thread
+does not call it while the physics thread steps, so the lock adds no measurable wait
+(`role_waits` in `aaemu-clientdriver perf`). Evidence: `C:\aa-re\notes\client-perf-r208022.md`.
 
 **Switches**, later wins: the table defaults, then `aadriver.ini` next to the DLL (`[perf]
 patches=...`), then `%AADRIVER_PATCHES%`, then `-aaemu-patches=` on the client command line. The
@@ -1145,7 +1150,8 @@ aaemu-launcher ... --cvar e_view_dist_ratio_vegetation=20
 ```
 
 CVars (`--cvar`, `--min-time-step`, `--cvar-preset streaming|view-near`, `[perf] cvars=`,
-`%AADRIVER_CVARS%`) are numeric only. They are set once at the first script tick through
+`%AADRIVER_CVARS%`) are numeric only: a finite decimal number within +-1e9, written into the Lua
+chunk in canonical form. A bad entry is logged and dropped; the others stay. They are set once at the first script tick through
 `System.SetCVar`, and `aadriver.log` records old and new values. The game can save CVars it owns
 into `system.cfg`.
 

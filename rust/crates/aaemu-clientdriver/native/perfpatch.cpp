@@ -801,11 +801,40 @@ static DWORD WINAPI diag_thread(LPVOID) {
 // physics-role-guard: a TracePendingRays call from a thread that is not the owner, while an owner
 // exists (its cell holds 0), runs as an ordinary caller (iCaller 4, the locked shared slot). For the
 // call, the role pointer and the caller's TLS are parked on a private cell pair, so MarkAsPhysThread
-// sees "already the owner" and swaps nothing; the owner keeps iCaller 0. If the owner takes the role
-// itself meanwhile (its own TimeStep), the partner rule moves it into the private pair's other cell,
-// which stays valid. Guarded calls are serialized. No image byte changes: the slot is replaced in a
-// heap copy of the world's vtable (gEnv->pPhysicalWorld vptr swap); the protector rejects CryPhysics
-// code changes.
+// sees "already the owner" and swaps nothing; the owner keeps iCaller 0. No image byte changes: the
+// slots are replaced in a heap copy of the world's vtable (gEnv->pPhysicalWorld vptr swap); the
+// protector rejects CryPhysics code changes.
+//
+// Role takes are serialised (g_roleLock). The engine moves the role pointer 0x35204100 in exactly four
+// places (canonical aa-r208022, every write reference): MarkAsPhysThread (called only from
+// TracePendingRays +0x1D3FB2), the two inline takes in TimeStep (+0xAFB3D when dt > 0, +0xB01C6 when
+// dt > 0 and !(flags & 0x800)) and the slot-34 unmark. All four compare the caller's TLS with the one
+// global pointer and, on a mismatch, move the role to partner(pointer) without a lock:
+//     TLS == cur        -> nothing (any cell values);
+//     TLS != cur (NULL) -> **cur = 4; other = 0x352040F8 + (((cur - 0x352040F8) ^ 4) >> 2) * 4;
+//                          *other = 0; cur = other; TLS = other.
+// A parked call needs its own TLS to equal cur when the original's MarkAsPhysThread runs; the owner's
+// take needs its TLS to differ from cur. Both read the same pointer, so no choice of cells makes both
+// no-ops in every interleaving: an owner take between the park and that mark moves cur to the private
+// pair's other cell, the mark then takes it back and the parked call runs as iCaller 0 while the
+// owner's query may still use slot 0 (and the restore afterwards can leave two threads on one cell).
+// So every path that can take the role holds g_roleLock while it can: the owner's TimeStep with
+// dt > 0 for its whole call (the inline takes sit in the middle of it), the owner's TracePendingRays
+// (its first instruction is the mark) and the unmark; a guarded call holds it from the park to the
+// restore. No owner take can fall inside a parked call, so the park is never moved under it.
+//
+// Why it cannot deadlock: g_roleLock is only taken at the entry of these three wrappers, before any
+// engine code of the call runs, by a thread that holds no CryPhysics lock (the physics thread loop and
+// the main thread's frame call them through the world vtable; none of them is called from inside a
+// CryPhysics lock, and no CryPhysics code inside them calls back into slots 33, 34 or 44). Inside it
+// the engine takes its own spin locks in its own order; nobody waits for g_roleLock while holding one.
+// It is a critical section, so a nested call on the same thread passes.
+// Why it does not stall the step: TracePendingRays already write-locks the world's ray-queue lock
+// (+0x53C0) right after its mark for the whole call, so the owner's and a guarded call were mutually
+// exclusive before; the role lock only adds the few instructions before that. A guarded call that
+// arrives during an owner's step waits for the step, but the main thread does not call
+// TracePendingRays while the physics thread steps (0 of about 20,000 traced calls, rays_during_owner_step
+// in lane client-perf/measure); role_waits counts every wait and its time.
 typedef void (__thiscall* StepFn)(void*, float, int);
 typedef int (__thiscall* RaysFn)(void*, int);
 static StepFn g_stepOriginal;
@@ -819,11 +848,14 @@ static volatile DWORD g_mainTid;
 struct StepStats { DWORD tid; LONG calls, positive, took, lost, rays, raysTook, raysGuarded; bool held; void* cell; };
 static StepStats g_steps[16];
 static SRWLOCK g_stepLock = SRWLOCK_INIT;
-static CRITICAL_SECTION g_parkLock;
+static CRITICAL_SECTION g_roleLock;
 static volatile LONG g_roleTakes, g_roleLogs, g_guarded, g_guardMoved, g_guardSkipped;
+// Waits for g_roleLock (another role path held it) and their total and longest time in microseconds.
+static volatile LONG g_roleWaits, g_roleWaitUs, g_roleWaitMaxUs;
+static void (*g_roleWaitHook)();  // tests: called before a thread blocks on g_roleLock
 // Thread inside TimeStep that held iCaller 0 when the step began (diag-physics-role only), and the
 // TracePendingRays calls of other threads that came in meanwhile: unguarded they take the role
-// while the owner steps (the race), guarded they are parked.
+// while the owner steps (the race), guarded they wait for the step.
 static volatile DWORD g_stepOwnerTid;
 static volatile LONG g_unsafeTakes, g_unsafeParked;
 // Two private cell pairs, 8-byte aligned like the engine pair (partner = cell ^ 4 relative to 0x352040F8).
@@ -833,6 +865,20 @@ static void* volatile* role_current() { return (void* volatile*)(g_physBase + kP
 static DWORD role_tls() { return *(DWORD*)(g_physBase + kPhysTlsIndex); }
 static bool in_pair(const void* cell, const volatile LONG* pair) { return cell == (const void*)&pair[0] || cell == (const void*)&pair[1]; }
 static bool holds_role(void* mine) { return mine && mine == *role_current(); }
+
+static void role_lock() {
+    if (TryEnterCriticalSection(&g_roleLock)) return;
+    if (g_roleWaitHook) g_roleWaitHook();
+    LARGE_INTEGER a, b, f;
+    QueryPerformanceCounter(&a);
+    EnterCriticalSection(&g_roleLock);
+    QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
+    LONG us = (LONG)((b.QuadPart - a.QuadPart) * 1000000 / (f.QuadPart ? f.QuadPart : 1));
+    InterlockedIncrement(&g_roleWaits);
+    InterlockedExchangeAdd(&g_roleWaitUs, us);
+    for (LONG m = g_roleWaitMaxUs; us > m && InterlockedCompareExchange(&g_roleWaitMaxUs, us, m) != m; m = g_roleWaitMaxUs) {}
+}
+static void role_unlock() { LeaveCriticalSection(&g_roleLock); }
 
 static StepStats* stats_for(DWORD tid) {
     for (StepStats& x : g_steps) if (x.tid == tid || !x.tid) { if (!x.tid) x.tid = tid; return &x; }
@@ -873,49 +919,45 @@ static int __fastcall hk_trace_rays(void* self, void*, int doTracing) {
     DWORD err = GetLastError();
     DWORD idx = role_tls(), tid = GetCurrentThreadId();
     void* mine = TlsGetValue(idx);
-    void* owner = *role_current();
     bool before = holds_role(mine);
     int r;
     bool guarded = false;
     DWORD stepper = g_stepOwnerTid;
     if (g_roleTrace && !before && stepper && stepper != tid)
         InterlockedIncrement(g_roleGuard ? &g_unsafeParked : &g_unsafeTakes);   // the owner is mid-step right now
+    // Once a stepping thread exists every call is a role path: the owner's own mark, or a park.
+    bool locked = g_roleGuard && g_stepper != 0;
+    if (locked) role_lock();
     DWORD physThread = g_stepper;
-    if (g_roleGuard && !before && owner && physThread && physThread != tid) {
-        EnterCriticalSection(&g_parkLock);
-        owner = *role_current();
-        if (!holds_role(mine) && owner) {
-            volatile LONG* pair = in_pair(owner, g_park[0]) ? g_park[1] : g_park[0];
-            pair[0] = 4; pair[1] = 4;               // a free pair: only non-owner cells, 4 is their value
-            TlsSetValue(idx, (void*)&pair[0]);
-            if (InterlockedCompareExchangePointer(role_current(), (void*)&pair[0], owner) == owner) {
-                SetLastError(err);
-                r = g_raysOriginal(self, doTracing);
-                err = GetLastError();
-                if (InterlockedCompareExchangePointer(role_current(), owner, (void*)&pair[0]) != (void*)&pair[0])
-                    InterlockedIncrement(&g_guardMoved);   // the physics thread took the role meanwhile (now on pair[1])
-                TlsSetValue(idx, mine);
-                InterlockedIncrement(&g_guarded);
-                guarded = true;
-            } else {
-                TlsSetValue(idx, mine);                  // the role moved before the park: engine behaviour
-                InterlockedIncrement(&g_guardSkipped);
-                SetLastError(err);
-                r = g_raysOriginal(self, doTracing);
-                err = GetLastError();
-            }
+    void* owner = *role_current();
+    before = holds_role(mine);
+    if (locked && !before && owner && physThread != tid) {
+        volatile LONG* pair = in_pair(owner, g_park[0]) ? g_park[1] : g_park[0];
+        pair[0] = 4; pair[1] = 4;               // a free pair: only non-owner cells, 4 is their value
+        TlsSetValue(idx, (void*)&pair[0]);
+        if (InterlockedCompareExchangePointer(role_current(), (void*)&pair[0], owner) == owner) {
+            SetLastError(err);
+            r = g_raysOriginal(self, doTracing);
+            err = GetLastError();
+            // Every role take holds g_roleLock, so nobody moved the park meanwhile; count it if it happens.
+            if (InterlockedCompareExchangePointer(role_current(), owner, (void*)&pair[0]) != (void*)&pair[0])
+                InterlockedIncrement(&g_guardMoved);
+            TlsSetValue(idx, mine);
+            InterlockedIncrement(&g_guarded);
+            guarded = true;
         } else {
+            TlsSetValue(idx, mine);              // the role moved by a path outside the wrappers: engine behaviour
             InterlockedIncrement(&g_guardSkipped);
             SetLastError(err);
             r = g_raysOriginal(self, doTracing);
             err = GetLastError();
         }
-        LeaveCriticalSection(&g_parkLock);
     } else {
         SetLastError(err);
         r = g_raysOriginal(self, doTracing);
         err = GetLastError();
     }
+    if (locked) role_unlock();
     if (g_roleTrace) note(false, before, holds_role(TlsGetValue(idx)), guarded, 0, doTracing);
     SetLastError(err);
     return r;
@@ -930,19 +972,19 @@ static void __fastcall hk_unmark(void* self, void*) {
     DWORD idx = role_tls();
     void* mine = TlsGetValue(idx);
     if (g_roleGuard) {
-        EnterCriticalSection(&g_parkLock);
+        role_lock();
         if (mine && mine == *role_current()) {
             g_phantom[0] = 0; g_phantom[1] = 4;
             InterlockedExchangePointer(role_current(), (void*)&g_phantom[0]);
             *(volatile LONG*)mine = 4;
             TlsSetValue(idx, nullptr);
             InterlockedIncrement(&g_unmarksParked);
-            LeaveCriticalSection(&g_parkLock);
+            role_unlock();
             if (g_roleTrace) plog("physics role: thread %lu unmarked; role parked ownerless (the engine hands it to the partner cell)", GetCurrentThreadId());
             SetLastError(err);
             return;
         }
-        LeaveCriticalSection(&g_parkLock);
+        role_unlock();
     }
     if (g_roleTrace) plog("physics role: thread %lu%s called unmark (slot 34), holds the role: %d", GetCurrentThreadId(),
                           GetCurrentThreadId() == g_mainTid ? " (main)" : "", (int)(mine && mine == *role_current()));
@@ -953,15 +995,19 @@ static void __fastcall hk_unmark(void* self, void*) {
 static void __fastcall hk_timestep(void* self, void*, float dt, int flags) {
     DWORD err = GetLastError();
     DWORD idx = role_tls();
+    // dt > 0: the original takes the role inline (+0xAFB3D, +0xB01C6), so the whole call is a role path.
+    bool locked = g_roleGuard && dt > 0;
+    if (locked) role_lock();
     bool before = holds_role(TlsGetValue(idx));
     if (dt > 0) g_stepper = GetCurrentThreadId();
-    SetLastError(err);
     if (before) g_stepOwnerTid = GetCurrentThreadId();
+    SetLastError(err);
     g_stepOriginal(self, dt, flags);
-    if (before) g_stepOwnerTid = 0;
-    if (!g_roleTrace) return;
     err = GetLastError();
-    note(true, before, holds_role(TlsGetValue(idx)), false, dt, flags);
+    if (before) g_stepOwnerTid = 0;
+    bool after = g_roleTrace && holds_role(TlsGetValue(idx));
+    if (locked) role_unlock();
+    if (g_roleTrace) note(true, before, after, false, dt, flags);
     SetLastError(err);
 }
 
@@ -1004,11 +1050,11 @@ static DWORD WINAPI role_sampler(LPVOID) {
 
 static std::string physics_role_summary() {
     std::string out;
-    char b[300];
+    char b[400];
     void* cur = *role_current();
     const LONG* cells = (const LONG*)(g_physBase + kPhysRoleCells);
-    _snprintf_s(b, sizeof b, _TRUNCATE, "physics role: takes=%ld guarded=%ld guard_moved=%ld guard_skipped=%ld unmarks_parked=%ld stepper=%lu rays_during_owner_step: unguarded=%ld parked=%ld current=%p cells=[%ld,%ld] park=[%ld,%ld][%ld,%ld]\n",
-                g_roleTakes, g_guarded, g_guardMoved, g_guardSkipped, g_unmarksParked, g_stepper, g_unsafeTakes, g_unsafeParked, cur, cells[0], cells[1], g_park[0][0], g_park[0][1], g_park[1][0], g_park[1][1]);
+    _snprintf_s(b, sizeof b, _TRUNCATE, "physics role: takes=%ld guarded=%ld guard_moved=%ld guard_skipped=%ld unmarks_parked=%ld role_waits=%ld wait_us=%ld max_wait_us=%ld stepper=%lu rays_during_owner_step: unguarded=%ld parked=%ld current=%p cells=[%ld,%ld] park=[%ld,%ld][%ld,%ld]\n",
+                g_roleTakes, g_guarded, g_guardMoved, g_guardSkipped, g_unmarksParked, g_roleWaits, g_roleWaitUs, g_roleWaitMaxUs, g_stepper, g_unsafeTakes, g_unsafeParked, cur, cells[0], cells[1], g_park[0][0], g_park[0][1], g_park[1][0], g_park[1][1]);
     out += b;
     AcquireSRWLockShared(&g_stepLock);
     for (StepStats& x : g_steps) {
@@ -1324,50 +1370,41 @@ static std::string env_value(const wchar_t* name) {
     return out;
 }
 
-static bool cvar_token_ok(const std::string& s, bool value) {
+static bool cvar_name_ok(const std::string& s) {
     if (s.empty() || s.size() > 64) return false;
-    for (char c : s) {
-        bool ok = value ? (isdigit((unsigned char)c) || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')
-                        : (isalnum((unsigned char)c) || c == '_');
-        if (!ok) return false;
-    }
+    for (char c : s) if (!isalnum((unsigned char)c) && c != '_') return false;
     return true;
 }
+// One bad entry is logged and dropped; the others stay (each value is already a canonical Lua number,
+// so one entry can no longer break the whole first-tick chunk).
 static void add_cvars(const std::string& text) {
     std::string tok;
     auto flush = [&]() {
+        if (tok.empty()) return;
         size_t c = tok.find(':'); if (c == std::string::npos) c = tok.find('=');
-        if (c != std::string::npos) {
-            std::string n = tok.substr(0, c), v = tok.substr(c + 1);
-            if (cvar_token_ok(n, false) && cvar_token_ok(v, true)) {
-                bool replaced = false;
-                for (auto& kv : g_cvars) if (_stricmp(kv.first.c_str(), n.c_str()) == 0) { kv.second = v; replaced = true; }
-                if (!replaced) g_cvars.push_back({ n, v });
-            } else plog("cvar '%s' ignored (name [A-Za-z0-9_], numeric value)", tok.c_str());
-        }
+        std::string n = c == std::string::npos ? tok : tok.substr(0, c), v = c == std::string::npos ? "" : tok.substr(c + 1), num;
+        if (c != std::string::npos && cvar_name_ok(n) && perfcore::canonical_number(v, num)) {
+            bool replaced = false;
+            for (auto& kv : g_cvars) if (_stricmp(kv.first.c_str(), n.c_str()) == 0) { kv.second = num; replaced = true; }
+            if (!replaced) g_cvars.push_back({ n, num });
+        } else plog("cvar '%s' ignored (needs name:value, name [A-Za-z0-9_], value a finite decimal number within +-1e9)", tok.c_str());
         tok.clear();
     };
     for (char ch : text) { if (ch == ';' || ch == ',' || ch == ' ') flush(); else tok += ch; }
     flush();
 }
 
-void attach(HMODULE self, Logger logger) {
-    if (g_attached) return;
-    g_attached = true;
-    g_self = self;
-    g_log = logger;
-    InitializeCriticalSection(&g_lock);
-    InitializeCriticalSection(&g_parkLock);
-    const wchar_t* cmd = GetCommandLineW();
-
-    // switches
-    std::string fromIni = ini_value(self, L"patches"), fromEnv = env_value(L"AADRIVER_PATCHES");
-    std::string fromCmd = perfcore::command_line_value(cmd, L"-aaemu-patches=");
+// Resolves every id once; the driver's older start-up paths (aadriver.cpp: pakio "optimize",
+// startup::install) ask enabled() instead of their own command-line flags, so "off" is off everywhere.
+// The launcher profile flags predate the table and stay as aliases for the defaults of their ids:
+// -aaemu-fast-pak (omitted by --no-fast-pak) for pak-readahead-64k and -aaemu-smooth-start
+// (--smooth-start) for cpu-calibration-normal-priority. An explicit switch for an id, "none" or "all"
+// wins over them.
+static void resolve_switches(const wchar_t* cmd, const std::string& fromIni, const std::string& fromEnv, const std::string& fromCmd) {
+    g_switches = perfcore::Switches();
     perfcore::apply_tokens(g_switches, fromIni);
     perfcore::apply_tokens(g_switches, fromEnv);
     perfcore::apply_tokens(g_switches, fromCmd);
-    // Launcher profile flags predate the table: --no-fast-pak omits -aaemu-fast-pak, --smooth-start adds
-    // -aaemu-smooth-start. Without explicit switches for those ids, follow them.
     bool launched = wcsstr(cmd, L"-aaemu-") != NULL;
     for (int i = 0; i < kPatchCount; ++i) {
         bool def = kPatches[i].defaultOn;
@@ -1375,17 +1412,34 @@ void attach(HMODULE self, Logger logger) {
         if (!strcmp(kPatches[i].id, "cpu-calibration-normal-priority")) def = wcsstr(cmd, L"-aaemu-smooth-start") != NULL;
         g_status[i].on = perfcore::enabled(g_switches, kPatches[i].id, def);
         g_status[i].state = g_status[i].on ? PENDING : OFF;
+        g_status[i].why.clear();
     }
     for (auto& kv : g_switches.explicitly) if (index_of(kv.first.c_str()) < 0) plog("unknown patch id '%s' ignored", kv.first.c_str());
-    add_cvars(ini_value(self, L"cvars"));
-    add_cvars(env_value(L"AADRIVER_CVARS"));
-    add_cvars(perfcore::command_line_value(cmd, L"-aaemu-cvars="));
-
     std::string on, off;
     for (int i = 0; i < kPatchCount; ++i) { std::string& s = g_status[i].on ? on : off; if (!s.empty()) s += ","; s += kPatches[i].id; }
     plog("switches: ini='%s' env='%s' cmd='%s'", fromIni.c_str(), fromEnv.c_str(), fromCmd.c_str());
     plog("on: %s", on.empty() ? "-" : on.c_str());
     plog("off: %s", off.empty() ? "-" : off.c_str());
+}
+
+bool enabled(const char* id) { return g_attached && is_on(id); }
+
+void attach(HMODULE self, Logger logger) {
+    if (g_attached) return;
+    g_attached = true;
+    g_self = self;
+    g_log = logger;
+    InitializeCriticalSection(&g_lock);
+    InitializeCriticalSection(&g_roleLock);
+    const wchar_t* cmd = GetCommandLineW();
+
+    // switches
+    std::string fromIni = ini_value(self, L"patches"), fromEnv = env_value(L"AADRIVER_PATCHES");
+    std::string fromCmd = perfcore::command_line_value(cmd, L"-aaemu-patches=");
+    resolve_switches(cmd, fromIni, fromEnv, fromCmd);
+    add_cvars(ini_value(self, L"cvars"));
+    add_cvars(env_value(L"AADRIVER_CVARS"));
+    add_cvars(perfcore::command_line_value(cmd, L"-aaemu-cvars="));
 
     // things the hooks need, resolved now (DllMain may use the loader)
     HMODULE kb = GetModuleHandleW(L"kernelbase.dll"), k32 = GetModuleHandleW(L"kernel32.dll");
@@ -1446,14 +1500,14 @@ std::string control(const std::string& cmd) {
         if (!g_status[i].why.empty()) { out += " ("; out += g_status[i].why; out += ')'; }
         out += '\n';
     }
-    char b[160];
+    char b[256];
     _snprintf_s(b, sizeof b, _TRUNCATE, "counters: splitpath_calls=%ld mode_hits=%ld mode_misses=%ld latency_set=%ld index_fallbacks=%ld\n",
                 g_splitCalls, g_modeHits, g_modeMisses, g_latencySet, g_indexFallbacks);
     out += b;
     if (g_raysOriginal && g_roleTrace) out += physics_role_summary();
     else if (g_raysOriginal) {
-        _snprintf_s(b, sizeof b, _TRUNCATE, "physics role guard: guarded=%ld guard_moved=%ld guard_skipped=%ld unmarks_parked=%ld stepper=%lu\n",
-                    g_guarded, g_guardMoved, g_guardSkipped, g_unmarksParked, g_stepper);
+        _snprintf_s(b, sizeof b, _TRUNCATE, "physics role guard: guarded=%ld guard_moved=%ld guard_skipped=%ld unmarks_parked=%ld role_waits=%ld wait_us=%ld max_wait_us=%ld stepper=%lu\n",
+                    g_guarded, g_guardMoved, g_guardSkipped, g_unmarksParked, g_roleWaits, g_roleWaitUs, g_roleWaitMaxUs, g_stepper);
         out += b;
     }
     LeaveCriticalSection(&g_lock);

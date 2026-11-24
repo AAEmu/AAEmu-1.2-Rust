@@ -10,6 +10,9 @@ typedef void (*Logger)(const char* fmt, ...);
 // notification and start the worker thread. Modules that are already loaded only get the patches
 // that are safe on running code.
 void attach(HMODULE self, Logger log);
+// The resolved switch of a patch id (false before attach). The driver's older start-up paths
+// (pak read-ahead "optimize", the CPU calibration priorities) run only when their id is on.
+bool enabled(const char* id);
 // Detach ('X'): restore what can be restored on running code (IAT slots, one-byte patches).
 void remove();
 // " perf=<applied>/<enabled>" for the ping reply.

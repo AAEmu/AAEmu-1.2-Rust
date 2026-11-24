@@ -5,6 +5,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <locale.h>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
@@ -115,6 +117,115 @@ inline std::string command_line_value(const wchar_t* cmd, const wchar_t* key) {
         out += part;
     }
     return out;
+}
+
+// ---- PE files (perfpatch-verify) ------------------------------------------------------------------
+// Maps a 32-bit PE file as the loader would (headers, then each section at its RVA) into `mem`.
+// Every header field is checked against the file and the image before use; a damaged file gives
+// false and a reason instead of an out-of-bounds read or write.
+struct PeImage { std::vector<uint8_t> mem; uint32_t stamp = 0, size = 0, base = 0; };
+const uint32_t kPeMaxImage = 0x10000000;                   // 256 MiB; the client modules are < 8 MiB
+inline bool pe_range(size_t total, size_t at, size_t len) { return at <= total && len <= total - at; }
+inline bool map_pe(const uint8_t* file, size_t n, PeImage& img, std::string& why) {
+    img = PeImage();
+    if (!file || n < sizeof(IMAGE_DOS_HEADER)) { why = "shorter than a DOS header"; return false; }
+    IMAGE_DOS_HEADER dos; memcpy(&dos, file, sizeof dos);
+    if (dos.e_magic != IMAGE_DOS_SIGNATURE) { why = "no MZ signature"; return false; }
+    if (dos.e_lfanew < (LONG)sizeof(IMAGE_DOS_HEADER) || !pe_range(n, (size_t)dos.e_lfanew, sizeof(IMAGE_NT_HEADERS32))) { why = "e_lfanew outside the file"; return false; }
+    size_t ntAt = (size_t)dos.e_lfanew;
+    IMAGE_NT_HEADERS32 nt; memcpy(&nt, file + ntAt, sizeof nt);
+    if (nt.Signature != IMAGE_NT_SIGNATURE || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) { why = "not a 32-bit PE"; return false; }
+    if (nt.FileHeader.SizeOfOptionalHeader < offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory)) { why = "optional header too short"; return false; }
+    uint32_t size = nt.OptionalHeader.SizeOfImage, hdrs = nt.OptionalHeader.SizeOfHeaders;
+    if (size == 0 || size > kPeMaxImage) { why = "SizeOfImage out of range"; return false; }
+    if (hdrs > n || hdrs > size) { why = "SizeOfHeaders exceeds the file or the image"; return false; }
+    size_t secAt = ntAt + offsetof(IMAGE_NT_HEADERS32, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
+    size_t secs = nt.FileHeader.NumberOfSections;
+    if (!pe_range(n, secAt, secs * sizeof(IMAGE_SECTION_HEADER))) { why = "section table outside the file"; return false; }
+    img.mem.assign(size, 0);
+    memcpy(img.mem.data(), file, hdrs);
+    for (size_t i = 0; i < secs; ++i) {
+        IMAGE_SECTION_HEADER s; memcpy(&s, file + secAt + i * sizeof s, sizeof s);
+        size_t raw = s.SizeOfRawData, ptr = s.PointerToRawData, at = s.VirtualAddress;
+        if (!raw) continue;
+        if (!pe_range(n, ptr, raw)) { why = "section " + std::to_string(i) + " raw data outside the file (truncated?)"; img = PeImage(); return false; }
+        if (at >= size) { why = "section " + std::to_string(i) + " starts outside SizeOfImage"; img = PeImage(); return false; }
+        size_t len = raw < size - at ? raw : size - at;    // raw data rounded past the image end is padding
+        memcpy(img.mem.data() + at, file + ptr, len);
+    }
+    img.stamp = nt.FileHeader.TimeDateStamp; img.size = size; img.base = nt.OptionalHeader.ImageBase;
+    return true;
+}
+// A NUL-terminated string at `at` inside the image, or "" when it runs off the end.
+inline std::string pe_string(const PeImage& img, size_t at) {
+    if (at >= img.mem.size()) return "";
+    const uint8_t* p = img.mem.data() + at;
+    const void* z = memchr(p, 0, img.mem.size() - at);
+    return z ? std::string((const char*)p, (const char*)z - (const char*)p) : std::string();
+}
+inline bool pe_u32(const PeImage& img, size_t at, uint32_t& v) {
+    if (!pe_range(img.mem.size(), at, 4)) return false;
+    memcpy(&v, img.mem.data() + at, 4); return true;
+}
+// Import name of the IAT slot at slotRva: "DLL!function" ("DLL!#ordinal"), or "" if it is not one.
+inline std::string pe_import_at(const PeImage& img, uint32_t slotRva) {
+    uint32_t lfanew = 0, rva = 0;
+    if (!pe_u32(img, offsetof(IMAGE_DOS_HEADER, e_lfanew), lfanew)) return "";
+    size_t dirAt = (size_t)lfanew + offsetof(IMAGE_NT_HEADERS32, OptionalHeader) +
+                   offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory) + IMAGE_DIRECTORY_ENTRY_IMPORT * sizeof(IMAGE_DATA_DIRECTORY);
+    if (!pe_u32(img, dirAt, rva) || !rva) return "";
+    for (size_t d = rva; pe_range(img.mem.size(), d, sizeof(IMAGE_IMPORT_DESCRIPTOR)); d += sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+        IMAGE_IMPORT_DESCRIPTOR desc; memcpy(&desc, img.mem.data() + d, sizeof desc);
+        if (!desc.Name) break;
+        uint32_t names = desc.OriginalFirstThunk ? desc.OriginalFirstThunk : desc.FirstThunk, slots = desc.FirstThunk;
+        for (uint32_t k = 0; k < 0x10000; ++k) {
+            uint32_t entry = 0;
+            if (!pe_u32(img, (size_t)names + 4 * (size_t)k, entry) || !entry) break;
+            if ((size_t)slots + 4 * (size_t)k != slotRva) continue;
+            std::string dll = pe_string(img, desc.Name);
+            if (entry & 0x80000000u) return dll + "!#ordinal";
+            return dll + "!" + pe_string(img, (size_t)entry + 2);
+        }
+    }
+    return "";
+}
+
+// ---- CVar values --------------------------------------------------------------------------------
+// A CVar value goes into a Lua chunk as a number literal. Accept only a whole decimal number
+// ([+-]digits[.digits][e[+-]digits], at least one digit before the exponent), finite and at most
+// kCvarMagnitude, and write it back canonically: an integer without a fraction, otherwise the
+// shortest %.*g that reads back to the same double, never a '+', "inf" or "nan" (Lua 5.1 has no unary
+// plus). Parsing and printing use the "C" locale, whatever the client set.
+const double kCvarMagnitude = 1e9;
+inline _locale_t c_locale() { static _locale_t l = _create_locale(LC_ALL, "C"); return l; }
+inline bool canonical_number(const std::string& in, std::string& out) {
+    size_t i = 0, n = in.size();
+    if (n == 0 || n > 64) return false;
+    if (in[i] == '+' || in[i] == '-') ++i;
+    size_t digits = 0;
+    while (i < n && in[i] >= '0' && in[i] <= '9') { ++i; ++digits; }
+    if (i < n && in[i] == '.') { ++i; while (i < n && in[i] >= '0' && in[i] <= '9') { ++i; ++digits; } }
+    if (!digits) return false;
+    if (i < n && (in[i] == 'e' || in[i] == 'E')) {
+        ++i;
+        if (i < n && (in[i] == '+' || in[i] == '-')) ++i;
+        size_t exp = 0;
+        while (i < n && in[i] >= '0' && in[i] <= '9') { ++i; ++exp; }
+        if (!exp) return false;
+    }
+    if (i != n || !c_locale()) return false;
+    char* end = NULL;
+    double v = _strtod_l(in.c_str(), &end, c_locale());
+    if (!end || *end || !(v == v) || v > kCvarMagnitude || v < -kCvarMagnitude) return false;
+    if (v == 0) v = 0;                                    // -0 -> 0
+    char b[40];
+    if (v == (double)(long long)v) { _snprintf_s_l(b, sizeof b, _TRUNCATE, "%lld", c_locale(), (long long)v); out = b; return true; }
+    for (int p = 1; p <= 17; ++p) {
+        _snprintf_s_l(b, sizeof b, _TRUNCATE, "%.*g", c_locale(), p, v);
+        if (_strtod_l(b, NULL, c_locale()) == v) break;
+    }
+    out = b;
+    return true;
 }
 
 // ---- fast _splitpath (crysystem's pak tree builder calls it for every directory level) ---------

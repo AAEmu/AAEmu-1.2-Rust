@@ -361,7 +361,8 @@ static bool setSlot(void** slot, void* value) {
 }
 
 static bool waitForClient() {
-    bool smooth = wcsstr(GetCommandLineW(), L"-aaemu-smooth-start") != NULL;
+    // -aaemu-smooth-start is the default of this id; an explicit perf switch overrides it.
+    bool smooth = perfpatch::enabled("cpu-calibration-normal-priority");
 #ifndef AADRIVER_PLAYER
     bool multiClient = wcsstr(GetCommandLineW(), L"-aaemu-multi-client") != NULL;
 #endif
@@ -556,7 +557,8 @@ static DWORD WINAPI serverThread(LPVOID) {
     }
     if (!waitForClient() || !installHook()) { logf("driver inactive"); }
     else {
-        if (wcsstr(GetCommandLineW(), L"-aaemu-fast-pak"))
+        // -aaemu-fast-pak is the default of this id; an explicit perf switch overrides it.
+        if (perfpatch::enabled("pak-readahead-64k"))
             logf("fast pak: %s", pakio::control("optimize").c_str());
         logf("DXGI capture hook: %s", visuals::install() ? "ready" : "unavailable");
     }
@@ -612,11 +614,11 @@ static DWORD WINAPI serverThread(LPVOID) {
         logf("compressed pak startup failed: %s", virtualpak::error().c_str());
         return 1;
     }
-    if (wcsstr(GetCommandLineW(), L"-aaemu-smooth-start") && !startup::install()) {
+    if (perfpatch::enabled("cpu-calibration-normal-priority") && !startup::install()) {
         logf("unsupported CPU calibration instructions; refusing player startup");
         return 1;
     }
-    if (wcsstr(GetCommandLineW(), L"-aaemu-fast-pak")) {
+    if (perfpatch::enabled("pak-readahead-64k")) {
         std::string result = pakio::control("optimize");
         if (result.empty() || result[0] != '0') { logf("fast pak: %s", result.c_str()); return 1; }
         logf("fast pak: %s", result.c_str());
