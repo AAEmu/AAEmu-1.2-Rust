@@ -7,16 +7,29 @@ The current harness exercises an experimental dev-client route. The workload and
 From the worktree's `rust` directory, build the upstream binaries:
 
 ```powershell
-$env:CARGO_TARGET_DIR = 'C:\aa-re\lanes\targets\perf-bench'
+$env:CARGO_TARGET_DIR = '<your target dir>'
 cargo build -j 4 -p aaemu-game -p aaemu-login -p aaemu-testclient -p aaemu-launcher
 ```
+
+Point the script at your local folders with parameters or `AAEMU_STRESS_*` environment variables:
+
+| Parameter | Variable | What |
+| --- | --- | --- |
+| `-Target` | `AAEMU_STRESS_TARGET` | Cargo output folder with `aaemu-game`, `aaemu-login`, `aaemu-testclient` (for example `<target dir>\debug`) |
+| `-Runtime` | `AAEMU_STRESS_RUNTIME` | A stopped AAEmu runtime (configuration, data, MySQL data folder) bound to ports 3417 / 28537 / 28534 / 28539 / 28550 / 28580; it is copied for every repeat |
+| `-DevClient` | `AAEMU_STRESS_DEVCLIENT` | The r208022 AAEmu dev client folder (`aadev-launch` and its pipe helper) |
+| `-ClientRoot` | `AAEMU_STRESS_CLIENTS` | Folder for the client copies `perf-stock` / `perf-dev` |
+| `-SourceClient` | `AAEMU_STRESS_CLIENT_SOURCE` | The read-only r208022 client install the copies come from (`game_pak` is hard-linked) |
+| `-StockDriver` | `AAEMU_STRESS_DRIVER` | `aadriver.dll` for the stock config |
+| `-MySqlBin` | `AAEMU_STRESS_MYSQL_BIN` | MySQL `bin` folder (default `C:\Program Files\MySQL\MySQL Server 8.4\bin`) |
+| `-Output` | `AAEMU_STRESS_OUTPUT` | Results folder (default `runs\` next to the script) |
 
 ```powershell
 .\Scripts\client-stress\Run-StressBench.ps1 -Config dev -Scenario players -Preset low -Bots 1 -Repeat 1 -Seconds 10
 .\Scripts\client-stress\Run-StressBench.ps1 -Config dev -Scenario players -Preset high -Bots 300 -Repeat 3
 ```
 
-Run the smoke test before the 100, 200, 300 and 500-player sweeps. The script uses Windows PowerShell, the local r208022 dev launcher and its pipe helper, the read-only `C:\AA1.2` install, and the stopped `C:\aa-re\lanes\live-audit` stack. It copies the runtime configuration, data and MySQL files for each repeat, binds to the audit port block, and runs the specified build's binaries. Temporary databases, GM defaults and AutoAccount changes are scoped to the copied runtime. The client copy hard-links only `game_pak`. Keep the original runtime stopped for the duration of the benchmark.
+Run the smoke test before the 100, 200, 300 and 500-player sweeps. The script uses Windows PowerShell, the r208022 dev launcher and its pipe helper, the read-only source client install, and the stopped runtime. It copies the runtime configuration, data and MySQL files for each repeat, binds to the audit port block, and runs the specified build's binaries. Temporary databases, GM defaults and AutoAccount changes are scoped to the copied runtime. The client copy hard-links only `game_pak`. Keep the original runtime stopped for the duration of the benchmark.
 
 ## Scenarios
 
@@ -36,9 +49,8 @@ The dev launcher sets 1024×768, spec 1 or 4, VSync off and the explicit frame c
 Each attempt has a separate result directory. Present frame durations come from the dev DLL's 240-entry ring. A frame counter delta larger than the returned history increments `missed_frames`. Treat runs with gaps or an incomplete route as incomplete captures. Hitch timestamps are estimates in the client uptime domain. The collector anchors each continuous segment to the age of the most recent Present and accumulates the recorded durations from that anchor. `summary.json` reports nearest-rank percentiles across the captured frames. Failed attempts retain partial results and a failure message. The series report lists the attempts and gives the median and range across complete captures. The script retains process CPU counters before and after the route, client thread CPU counters, an asynchronous main-thread sampling profile, game file read statistics, sampled memory and handle counts, and the dev crash summaries. Login timing begins at launcher invocation and ends at the first successful in-world check.
 
 The stock path uses the full native aadriver build. Set `AADRIVER_OUT` to
-`C:\aa-re\lanes\targets\perf-bench\aadriver` and run
-`rust\crates\aaemu-clientdriver\native\build.bat`, or supply the DLL path
-with `-StockDriver`. The stock route uses the original launcher and client,
+an output folder, run `rust\crates\aaemu-clientdriver\native\build.bat`,
+and pass the built DLL with `-StockDriver`. The stock route uses the original launcher and client,
 the driver’s Lua and input commands, frame-only Present records and pak
 I/O counters. Its Present records carry Unix microseconds. The stock
 client uses the Windows account’s shared ArcheAge Documents directory.

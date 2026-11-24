@@ -8,7 +8,8 @@ param(
     [ValidateRange(10,300)][int]$Seconds = 30,
     [switch]$TraceEtw,
     [switch]$StageObserverFirst,
-    [string]$StockDriver = 'C:\aa-re\lanes\targets\perf-bench\aadriver\aadriver.dll',
+    # Paths default to AAEMU_STRESS_* environment variables (see README.md).
+    [string]$StockDriver = $env:AAEMU_STRESS_DRIVER,
     # Stock only: the driver's client performance patch list (aaemu-launcher --patch), '' = defaults.
     [string]$Patch = '',
     # Stock only: more aaemu-launcher arguments (for example '--frame-latency','2').
@@ -20,18 +21,35 @@ param(
     # effects / combined: firework item and its use skill, used by every bot every tick.
     [int]$EffectItem = 15863,
     [int]$EffectSkill = 13392,
-    [string]$Target = 'C:\aa-re\lanes\targets\perf-bench\debug',
-    [string]$Output = 'C:\aa-re\lanes\client-perf\bench\runs'
+    # Cargo output folder holding aaemu-game, aaemu-login and aaemu-testclient.
+    [string]$Target = $env:AAEMU_STRESS_TARGET,
+    # Results folder (default: runs\ next to this script).
+    [string]$Output = $env:AAEMU_STRESS_OUTPUT,
+    # Stopped AAEmu runtime (configuration, data, MySQL data folder), copied for every repeat.
+    [string]$Runtime = $env:AAEMU_STRESS_RUNTIME,
+    # r208022 AAEmu dev client folder (aadev-launch and its pipe helper).
+    [string]$DevClient = $env:AAEMU_STRESS_DEVCLIENT,
+    # Folder for the per-config client copies (perf-stock, perf-dev).
+    [string]$ClientRoot = $env:AAEMU_STRESS_CLIENTS,
+    # Read-only r208022 client install the copies are made from (game_pak is hard-linked).
+    [string]$SourceClient = $env:AAEMU_STRESS_CLIENT_SOURCE,
+    [string]$MySqlBin = $env:AAEMU_STRESS_MYSQL_BIN
 )
 $ErrorActionPreference = 'Stop'
 if ($Config -eq 'archenova') { throw 'ArcheNova requires a dedicated NativeAbility server and client fixture.' }
+if (!$Output) { $Output = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'runs' }
+if (!$MySqlBin) { $MySqlBin = 'C:\Program Files\MySQL\MySQL Server 8.4\bin' }
+foreach ($required in 'Target', 'Runtime', 'DevClient', 'ClientRoot', 'SourceClient') {
+    if (!(Get-Variable $required -ValueOnly)) { throw "-$required (or its AAEMU_STRESS_* variable) is required; see README.md." }
+}
+if ($Config -eq 'stock' -and !$StockDriver) { throw '-StockDriver (or AAEMU_STRESS_DRIVER) is required for the stock config.' }
 
-$audit = 'C:\aa-re\lanes\live-audit'
-$dev = 'C:\aa-re\devclient-r208022'
-$mysql = 'C:\Program Files\MySQL\MySQL Server 8.4\bin'
-$client = "C:\aa-re\testclients\perf-$Config"
+$audit = $Runtime
+$dev = $DevClient
+$mysql = $MySqlBin
+$client = Join-Path $ClientRoot "perf-$Config"
 $ports = @(3417,28537,28534,28539,28550,28580)
-$source = 'C:\AA1.2'
+$source = $SourceClient
 $center = if ($Scenario -eq 'water') { @(15458,10366,100.5) } else { @(15562,15354,128.0) }
 # r208022's client scene uses a cell-relative origin. The land route showed
 # (4298, 4090) after a server teleport to (15562, 15354).
@@ -550,7 +568,9 @@ try {
             Copy-Tree "$audit\rs-login" "$runtime\login" @('/XD','Logs')
             Copy-Tree "$audit\rs-game" "$runtime\game" @('/XD','Logs')
             $root = $runtime.Replace('\','/')
-            $iniText = (Get-Content "$audit\mysql\my.ini" -Raw) -replace 'C:/aa-re/lanes/live-audit/mysql/data',"$root/mysql" -replace 'C:/aa-re/lanes/live-audit/logs',"$root" -replace 'C:/aa-re/lanes/live-audit/mysql',"$root"
+            # The runtime's my.ini names its own folders (forward slashes); point them at the copy.
+            $auditRoot = [regex]::Escape(((Resolve-Path -LiteralPath $audit).Path.TrimEnd('\')).Replace('\','/'))
+            $iniText = (Get-Content "$audit\mysql\my.ini" -Raw) -replace "(?i)$auditRoot/mysql/data","$root/mysql" -replace "(?i)$auditRoot/logs","$root" -replace "(?i)$auditRoot/mysql","$root"
             $iniText | Set-Content -LiteralPath $ini -Encoding ASCII
             foreach ($server in 'login','game') {
                 $path = "$runtime\$server\Config.Local.json"
