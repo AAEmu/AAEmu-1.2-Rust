@@ -82,6 +82,8 @@ struct Counts {
     /// Target (name, template id, position) of the last cast and the first rejection code.
     last_target: String,
     first_reject: Option<(i64, String)>,
+    effects: u32,
+    boat_moves: u32,
 }
 
 pub(super) async fn run(
@@ -147,11 +149,17 @@ pub(super) async fn run(
     };
     r.end(s, note);
 
-    // ---- boat ----
-    if !cfg.busy_skip_boat {
+    // ---- boat (every `busy_boat_every`th bot; the others swim) ----
+    let mut boat = None;
+    if !cfg.busy_skip_boat
+        && (cfg.busy_boat_every <= 1 || idx.is_multiple_of(u64::from(cfg.busy_boat_every)))
+    {
         let s = r.begin("game.busy.boat");
         let note = match setup_boat(game, cfg).await {
-            Ok(note) => note,
+            Ok((note, obj)) => {
+                boat = Some(obj);
+                note
+            }
             Err(e) if game.state.disconnected => return Err(e),
             Err(e) => format!("WARN no boat: {e:#}"),
         };
@@ -186,12 +194,29 @@ pub(super) async fn run(
     }
     r.end(s, format!("{spawned}/4 GM spawns accepted"));
 
+    // ---- effect item (fireworks) ----
+    let mut effect = None;
+    if cfg.busy_effect_item != 0 && cfg.busy_effect_skill != 0 {
+        let s = r.begin("game.busy.effect");
+        let reply = gm_command(
+            game,
+            &format!("item add self {} 1000", cfg.busy_effect_item),
+        )
+        .await?;
+        effect = stack_id(&reply, cfg.busy_effect_item);
+        let note = match effect {
+            Some(id) => format!("effect item {} stack {id}", cfg.busy_effect_item),
+            None => format!("WARN effect item {} was not added", cfg.busy_effect_item),
+        };
+        r.end(s, note);
+    }
+
     // ---- activity loop ----
     let s = r.begin("game.busy.loop");
     if cfg.busy_center.is_some() {
         println!("busy ready {}", cfg.user);
     }
-    let counts = activity(game, cfg, idx).await?;
+    let counts = activity(game, cfg, idx, boat, effect).await?;
     let errors: Vec<String> = counts
         .errors
         .iter()
@@ -201,7 +226,7 @@ pub(super) async fn run(
         s,
         format!(
             "{}s: {} casts ({} answered, {} rejected), {} self actions, {} moves, {} chats, \
-             {} packets, SCErrorMsg [{}], first reject {:?}",
+             {} packets, SCErrorMsg [{}], first reject {:?}, {} effects, {} boat moves",
             cfg.busy_secs,
             counts.casts,
             counts.responses,
@@ -211,7 +236,9 @@ pub(super) async fn run(
             counts.chats,
             counts.packets,
             errors.join(" "),
-            counts.first_reject
+            counts.first_reject,
+            counts.effects,
+            counts.boat_moves
         ),
     );
 
@@ -240,10 +267,17 @@ async fn setup_mate(game: &mut GameClient, cfg: &BotConfig) -> anyhow::Result<St
     ))
 }
 
-async fn setup_boat(game: &mut GameClient, cfg: &BotConfig) -> anyhow::Result<String> {
+async fn setup_boat(game: &mut GameClient, cfg: &BotConfig) -> anyhow::Result<(String, u32)> {
     let reply = gm_command(game, &format!("item add self {} 1", cfg.busy_boat_item)).await?;
     let item = stack_id(&reply, cfg.busy_boat_item).context("boat item was not added")?;
-    let slaves = |g: &GameClient| g.state.units.values().filter(|u| u.unit_type == 2).count();
+    let slaves = |g: &GameClient| -> Vec<u32> {
+        g.state
+            .units
+            .values()
+            .filter(|u| u.unit_type == 2)
+            .map(|u| u.obj_id)
+            .collect()
+    };
     let before = slaves(game);
     game.use_item_skill(cfg.busy_boat_skill, item, cfg.busy_boat_item)
         .await?;
@@ -258,8 +292,11 @@ async fn setup_boat(game: &mut GameClient, cfg: &BotConfig) -> anyhow::Result<St
                 p.stream().read_i16().unwrap_or(0)
             );
         }
-        if slaves(game) > before {
-            return Ok(format!("boat {} summoned", cfg.busy_boat_item));
+        if let Some(obj) = slaves(game).into_iter().find(|o| !before.contains(o)) {
+            return Ok((
+                format!("boat {} summoned (obj {obj})", cfg.busy_boat_item),
+                obj,
+            ));
         }
         if Instant::now() >= deadline {
             bail!("no slave appeared within 12 s of the summon skill");
@@ -267,13 +304,20 @@ async fn setup_boat(game: &mut GameClient, cfg: &BotConfig) -> anyhow::Result<St
     }
 }
 
-async fn activity(game: &mut GameClient, cfg: &BotConfig, idx: u64) -> anyhow::Result<Counts> {
+async fn activity(
+    game: &mut GameClient,
+    cfg: &BotConfig,
+    idx: u64,
+    boat: Option<u32>,
+    effect: Option<u64>,
+) -> anyhow::Result<Counts> {
     let mut c = Counts::default();
     let started = Instant::now();
     let end = started + Duration::from_secs(cfg.busy_secs);
     let period = Duration::from_millis(1000 + (mix(idx) % 1000));
     let mut next_chat = started + Duration::from_secs(5 + mix(idx + 99) % 10);
     let mut tick = 0u64;
+    let mut boat_origin: Option<Option<(f32, f32, f32)>> = None;
     while Instant::now() < end {
         tick += 1;
         let me = game.state.self_obj;
@@ -312,6 +356,27 @@ async fn activity(game: &mut GameClient, cfg: &BotConfig, idx: u64) -> anyhow::R
                 );
                 game.move_to(to, clock).await?;
                 c.moves += 1;
+            }
+        }
+        // Effects: the item's use skill on the bot itself, every tick.
+        if let Some(item) = effect {
+            game.start_item_skill(cfg.busy_effect_skill, item, cfg.busy_effect_item, me)
+                .await?;
+            c.effects += 1;
+        }
+        // Moving hull: the boat circles its summon point (radius 12 m, one lap per minute).
+        if let (Some(obj), true) = (boat, cfg.busy_boat_move) {
+            if let Some(origin) =
+                *boat_origin.get_or_insert_with(|| game.state.units.get(&obj).map(|u| u.pos))
+            {
+                let a = started.elapsed().as_secs_f32() * std::f32::consts::TAU / 60.0 + idx as f32;
+                let to = (
+                    origin.0 + 12.0 * a.cos(),
+                    origin.1 + 12.0 * a.sin(),
+                    origin.2,
+                );
+                game.move_obj_to(obj, to, clock).await?;
+                c.boat_moves += 1;
             }
         }
         if Instant::now() >= next_chat {

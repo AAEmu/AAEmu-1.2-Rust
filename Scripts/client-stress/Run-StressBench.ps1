@@ -9,12 +9,22 @@ param(
     [switch]$TraceEtw,
     [switch]$StageObserverFirst,
     [string]$StockDriver = 'C:\aa-re\lanes\targets\perf-bench\aadriver\aadriver.dll',
+    # Stock only: the driver's client performance patch list (aaemu-launcher --patch), '' = defaults.
+    [string]$Patch = '',
+    # Stock only: more aaemu-launcher arguments (for example '--frame-latency','2').
+    [string[]]$LauncherArgs = @(),
+    # Stock only: add the driver's diag-frame-trace (hitch stack samples, frametrace-<pid>.tsv).
+    [switch]$TraceFrames,
+    # housing / combined: houses placed in the copied database before the game server starts.
+    [ValidateRange(0,1000)][int]$Houses = 300,
+    # effects / combined: firework item and its use skill, used by every bot every tick.
+    [int]$EffectItem = 15863,
+    [int]$EffectSkill = 13392,
     [string]$Target = 'C:\aa-re\lanes\targets\perf-bench\debug',
     [string]$Output = 'C:\aa-re\lanes\client-perf\bench\runs'
 )
 $ErrorActionPreference = 'Stop'
 if ($Config -eq 'archenova') { throw 'ArcheNova requires a dedicated NativeAbility server and client fixture.' }
-if ($Scenario -in 'housing','effects','combined') { throw "The $Scenario seed fixture is pending." }
 
 $audit = 'C:\aa-re\lanes\live-audit'
 $dev = 'C:\aa-re\devclient-r208022'
@@ -25,7 +35,7 @@ $source = 'C:\AA1.2'
 $center = if ($Scenario -eq 'water') { @(15458,10366,100.5) } else { @(15562,15354,128.0) }
 # r208022's client scene uses a cell-relative origin. The land route showed
 # (4298, 4090) after a server teleport to (15562, 15354).
-$localCenter = if ($Scenario -eq 'water') { @(4194,4222) } else { @(4298,4090) }
+$localCenter = if ($Scenario -eq 'water') { @(4194,3198) } else { @(4298,4090) }
 $spec = if ($Preset -eq 'high') { 4 } else { 1 }
 $lease = New-Object Threading.Mutex($false, 'Local\AAEmuLiveAuditStressBench')
 
@@ -160,11 +170,17 @@ function Assert-BotsActive {
 }
 function Start-BotFixture($Root) {
     $botConfig = "$runtime\bot.json"
-    [IO.File]::WriteAllText($botConfig, (@{
+    $bot = @{
         login='127.0.0.1:28537';user='unused';password=$env:AAEMU_STRESS_PASSWORD
         character='unused';busy_center=$center;busy_secs=($Seconds + 420)
         busy_skip_boat=($Scenario -ne 'water')
-    } | ConvertTo-Json))
+    }
+    if ($Scenario -eq 'water') {
+        # Half the crowd swims at the sea point, the other half circles in summoned rowboats.
+        $bot.busy_boat_every = 2; $bot.busy_boat_move = $true
+    }
+    if ($Scenario -in 'effects','combined') { $bot.busy_effect_item = $EffectItem; $bot.busy_effect_skill = $EffectSkill }
+    [IO.File]::WriteAllText($botConfig, ($bot | ConvertTo-Json))
     $botsProcess = Start-Owned bots "$Target\aaemu-testclient.exe" $Root @(
         'load','--config',"`"$botConfig`"",'--prefix','perfbot','--bots',$n,'--ramp-ms','50','--scenario','busy'
     )
@@ -177,6 +193,40 @@ function Start-BotFixture($Root) {
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($ready -ne $n) { throw "Only $ready of $n bots became ready." }
     $botsProcess
+}
+
+# Housing fixture: finished r208022 small Nuian houses (templates 172-181, 3 build steps, garden
+# radius 7.5 m) on an 18 m grid around the scene, each with six floor decorations (vase, bonsai,
+# two tables, two chairs) as house-owned doodads. Written into the copied database before the game
+# server starts, which loads them like player housing (LoadPlayerHousing + persistent doodads).
+# The height is the scene's z; uneven ground leaves some houses slightly sunk or raised.
+function Seed-HousingDb([int]$Count) {
+    if (-not $Count) { return }
+    $gameDb = (Get-Content "$runtime\game\Config.Local.json" -Raw | ConvertFrom-Json).Connections.MySQLProvider.Database
+    $decor = @(5450,5454,5462,5464,5483,5487)
+    $cols = [Math]::Ceiling([Math]::Sqrt($Count))
+    $sql = New-Object Text.StringBuilder
+    [void]$sql.AppendLine("USE ``$gameDb``;")
+    $now = [DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss')
+    $until = [DateTime]::UtcNow.AddDays(30).ToString('yyyy-MM-dd HH:mm:ss')
+    for ($i = 0; $i -lt $Count; $i++) {
+        $gx = $i % $cols; $gy = [Math]::Floor($i / $cols)
+        # skip the 40 m square around the observer's route
+        $x = $center[0] + 18 * ($gx - [Math]::Floor($cols / 2)); $y = $center[1] + 18 * ($gy - [Math]::Floor($cols / 2))
+        if ([Math]::Abs($x - $center[0]) -lt 20 -and [Math]::Abs($y - $center[1]) -lt 20) { $x += 18 * $cols }
+        $id = 50000 + $i
+        [void]$sql.AppendLine("INSERT INTO housings (id,account_id,owner,co_owner,template_id,name,x,y,z,yaw,pitch,roll,current_step,current_action,permission,place_date,protected_until,faction_id,sell_to,sell_price,allow_recover) VALUES ($id,0,0,0,$(172 + $i % 10),'Perf house $i',$x,$y,$($center[2]),0,0,0,-1,0,2,'$now','$until',2,0,0,0);")
+        for ($k = 0; $k -lt $decor.Count; $k++) {
+            $dx = 2.0 * (($k % 3) - 1); $dy = 2.0 * ([Math]::Floor($k / 3) - 0.5)
+            [void]$sql.AppendLine("INSERT INTO doodads (owner_id,owner_type,attach_point,template_id,current_phase_id,plant_time,growth_time,phase_time,x,y,z,roll,pitch,yaw,scale,item_id,house_id,parent_doodad,item_template_id,item_container_id,data,farm_type) VALUES ($id,3,0,$($decor[$k]),0,'$now','$now','$now',$($x + $dx),$($y + $dy),$($center[2] + 0.3),0,0,0,1,0,$id,0,0,0,0,0);")
+        }
+    }
+    $file = "$runtime\housing-fixture.sql"
+    [IO.File]::WriteAllText($file, $sql.ToString())
+    $p = Start-Process "$mysql\mysql.exe" -ArgumentList '--host=127.0.0.1','--port=3417','--user=root' -RedirectStandardInput $file `
+        -RedirectStandardOutput "$run\housing-seed.out" -RedirectStandardError "$run\housing-seed.err" -WindowStyle Hidden -PassThru -Wait
+    if ($p.ExitCode) { throw "Housing fixture insert failed, see housing-seed.err" }
+    "$Count houses, $($Count * $decor.Count) decorations" | Set-Content "$run\housing-fixture.txt"
 }
 
 function Wait-Dev([string]$Description, [int]$TimeoutSeconds, [scriptblock]$Check) {
@@ -230,13 +280,38 @@ function Seed-Farm {
     Start-Sleep -Milliseconds 700
     $spawned = @(Get-FarmDoodads | Where-Object { -not $original.ContainsKey($_.id) -and $_.template -in $templates })
     Save-Json $spawned 'farm-doodads.json'
-    if ($spawned.Count -ne 200) {
+    # combined: the house grid blocks part of the farm grid; accept at least half
+    if (($Scenario -ne 'combined' -and $spawned.Count -ne 200) -or $spawned.Count -lt 100) {
         throw "Farm fixture expected 200 new doodads and found $($spawned.Count). See farm-doodads.json."
     }
     $cropPhases = @($spawned | Where-Object template -EQ $templates[0] | Group-Object phase)
-    if ($cropPhases.Count -lt 2) {
+    if ($cropPhases.Count -lt 2 -and $Scenario -ne 'combined') {
         throw 'Farm fixture did not produce mixed growth stages. See farm-doodads.json.'
     }
+}
+
+# combined: a zone transition inside the measured route (to the sea point at half time, back at 3/4).
+function Invoke-RouteTransition($Clock) {
+    if ($Scenario -ne 'combined') { return }
+    $t = $Clock.Elapsed.TotalSeconds
+    if (-not $script:awaySent -and $t -ge $Seconds * 0.5) {
+        Send-Gm '/move 15458 10366 100.5'; $script:awaySent = $true
+        "$([DateTime]::UtcNow.ToString('o'))`taway 15458 10366" | Add-Content "$run\transitions.tsv"
+    } elseif ($script:awaySent -and -not $script:backSent -and $t -ge $Seconds * 0.75) {
+        Send-Gm "/move $($center -join ' ')"; $script:backSent = $true
+        "$([DateTime]::UtcNow.ToString('o'))`tback $($center[0]) $($center[1])" | Add-Content "$run\transitions.tsv"
+    }
+}
+# combined: time from a teleport request to the observer standing at the target (zone change and back).
+function Measure-ZoneTransition($To, $LocalTo) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    Send-Gm "/move $($To -join ' ')"
+    Wait-Dev 'zone transition' 60 {
+        $p = (Lua "local id=X2Unit:GetUnitId('player'); local x,y,z=X2Unit:GetUnitWorldPosition(id); return string.format('%.2f %.2f',x,y)").Trim('"') -split ' '
+        $p.Count -eq 2 -and (([Math]::Abs($To[0] - [double]$p[0]) -lt 5 -and [Math]::Abs($To[1] - [double]$p[1]) -lt 5) -or
+            ([Math]::Abs($LocalTo[0] - [double]$p[0]) -lt 5 -and [Math]::Abs($LocalTo[1] - [double]$p[1]) -lt 5))
+    }
+    $sw.ElapsedMilliseconds
 }
 
 function Write-TraceMarker($Name) {
@@ -266,7 +341,9 @@ function Measure-Route {
     $movement = 'W'
     try {
         Call-Dev input_key @{key=$movement;action='down'} | Out-Null
+        $script:awaySent = $false; $script:backSent = $false
         while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
+            Invoke-RouteTransition $clock
             $pollStart = [DateTime]::UtcNow
             $stats = Call-Dev stats @{history=$true}
             if ($script:traceStarted) {
@@ -372,7 +449,9 @@ function Measure-StockRoute {
         Call-Stock 'Rstart frame' | Out-Null
         $tracing = $true
         $direction = 'w'
+        $script:awaySent = $false; $script:backSent = $false
         while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
+            Invoke-RouteTransition $clock
             Assert-BotsActive
             Call-Stock "I$direction 2000" | Out-Null
             if ($clock.ElapsedMilliseconds -ge 1000) { Call-Stock 'Ispace 100' | Out-Null }
@@ -450,7 +529,7 @@ try {
     if ($archive.LinkType -ne 'HardLink' -or $archive.Target -notcontains "$source\game_pak") {
         throw 'Expected a hard link to the original r208022 game_pak'
     }
-    $n = if ($Scenario -eq 'farming') { 0 } else { $Bots }
+    $n = if ($Scenario -in 'farming','housing') { 0 } else { $Bots }
     $series = [Guid]::NewGuid().ToString('N').Substring(0,12)
     $results = New-Object 'Collections.Generic.List[object]'
     for ($rep=1; $rep -le $Repeat; $rep++) {
@@ -480,7 +559,7 @@ try {
                 if ($server -eq 'game') {
                     $local | Add-Member -Force NoteProperty Account @{AccessLevelDefault=100}
                     $local.ClientData.Sources = @("$client\game_pak")
-                    if ($Scenario -eq 'farming') {
+                    if ($Scenario -in 'farming','combined') {
                         $local.WebApiNetwork | Add-Member -Force NoteProperty ApiKey $farmApiKey
                     }
                 } else {
@@ -490,6 +569,7 @@ try {
             }
             $db = Start-Owned mysql "$mysql\mysqld.exe" $root @("--defaults-file=`"$ini`"")
             Wait-Port 3417 $db 90
+            if ($Scenario -in 'housing','combined') { Seed-HousingDb $Houses }
             $login = Start-Owned login "$Target\aaemu-login.exe" "$runtime\login"
             Wait-Port 28537 $login 60
             Wait-Port 28534 $login 60
@@ -518,14 +598,23 @@ try {
                 $passwordFile = "$runtime\stock-password.txt"
                 [IO.File]::WriteAllText($passwordFile, $env:AAEMU_STRESS_PASSWORD)
                 $stockStartedUtc = [DateTime]::UtcNow
-                $launcher = Start-Owned launcher "$Target\aaemu-launcher.exe" "$client\bin32" @(
-                    '--client',"`"$client\bin32\archeage.exe`"",'--driver-dll',"`"$StockDriver`"",
+                # A per-run copy of the driver: aadriver.log and frametrace-<pid>.tsv land next to it.
+                $runDriver = (New-Item -ItemType Directory -Path "$run\driver" -Force).FullName
+                Copy-Item -LiteralPath $StockDriver -Destination "$runDriver\aadriver.dll"
+                Copy-Item -LiteralPath (Join-Path (Split-Path $StockDriver) 'aainject.exe') -Destination "$runDriver\aainject.exe"
+                $patchList = @($Patch) + $(if ($TraceFrames) { '+diag-frame-trace' }) | Where-Object { $_ }
+                $stockArgs = @(
+                    '--client',"`"$client\bin32\archeage.exe`"",'--driver-dll',"`"$runDriver\aadriver.dll`"",
                     '--login','127.0.0.1:28537','--user',$user,'--password-file',"`"$passwordFile`"",
                     '--no-compressed-pak','--multi-client','--arg','-aaemu-hidden',
                     '--arg','+r_driver','--arg','DX10','--arg','+r_width','--arg','1024',
                     '--arg','+r_height','--arg','768','--arg','+r_fullscreen','--arg','0',
-                    '--arg','+r_vsync','--arg','0','--arg','+sys_spec_full','--arg',$spec
+                    '--arg','+r_vsync','--arg','0','--arg','+sys_spec_full','--arg',$spec,
+                    # The hidden window is unfocused: without this the engine sleeps 40 ms per frame.
+                    '--cvar','sys_sleep_background=0'
                 )
+                if ($patchList) { $stockArgs += @('--patch', ($patchList -join ',')) }
+                $launcher = Start-Owned launcher "$Target\aaemu-launcher.exe" "$client\bin32" ($stockArgs + @($LauncherArgs | Where-Object { $_ }))
                 $pidDeadline = [Diagnostics.Stopwatch]::StartNew()
                 do {
                     $line = Select-String -LiteralPath "$run\launcher.out" -Pattern '^client started \(pid (\d+)\)' |
@@ -605,7 +694,7 @@ try {
                 "utc`tevent" | Set-Content "$run\trace-markers.tsv"
                 Write-TraceMarker "client-pid=$($gameClient.Id)"
             }
-            if ($Scenario -eq 'farming') {
+            if ($Scenario -in 'farming','combined') {
                 Write-TraceMarker 'farm-fixture-start'
                 Seed-Farm
             } else {
@@ -625,8 +714,21 @@ try {
                     ([Math]::Abs($localCenter[0] - $x) -lt 5 -and [Math]::Abs($localCenter[1] - $y) -lt 5)
             }
             Write-TraceMarker 'scene-position-confirmed'
-            if ($Config -eq 'stock') { Measure-StockRoute } else { Measure-Route }
-            if ($Scenario -eq 'farming') {
+            if ($Config -eq 'stock') { Measure-StockRoute; try { Call-Stock 'Q' | Set-Content "$run\perf-status.txt" } catch {} } else { Measure-Route }
+            if ($Scenario -notin 'farming','combined') {
+                try {
+                    if ($Config -eq 'stock') { Call-Stock 'C' "$run\scene.png" | Out-Null }
+                    else { Save-Json (Call-Dev screenshot @{format='png';inline=$false;path="$run\scene.png"}) 'scene.json' }
+                } catch { Write-Warning "Scene screenshot failed: $($_.Exception.Message)" }
+            }
+            if ($Scenario -eq 'combined') {
+                try {
+                    $away = Measure-ZoneTransition @(15458,10366,100.5) @(4194,3198)
+                    $back = Measure-ZoneTransition $center $localCenter
+                    Save-Json @{away_ms=$away; back_ms=$back} 'zone-transition.json'
+                } catch { Write-Warning "Zone transition timing failed. $($_.Exception.Message)" }
+            }
+            if ($Scenario -in 'farming','combined') {
                 try {
                     $doodads = Get-Content "$run\farm-doodads.json" -Raw | ConvertFrom-Json
                     $ids = $doodads.id -join ','

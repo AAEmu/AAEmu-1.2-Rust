@@ -226,6 +226,22 @@ pub struct BotConfig {
     pub busy_boat_item: u32,
     #[serde(default = "default_busy_boat_skill")]
     pub busy_boat_skill: u32,
+    /// `busy`: only every Nth bot summons a boat (the others swim at the sea point); 0 and 1
+    /// mean every bot.
+    #[serde(default)]
+    pub busy_boat_every: u32,
+    /// `busy`: steer the summoned boat in a slow circle every tick (`CSMoveUnitPacket` for the
+    /// slave), so the scene has moving hulls and wakes.
+    #[serde(default)]
+    pub busy_boat_move: bool,
+    /// `busy`: an effect item (for example a firework, 15591 green / 15594 red / 15595 blue /
+    /// 15863 dragon) used every tick on the bot itself through its use skill
+    /// (`busy_effect_skill`, the item's `use_skill_id`); 0 = off. A stack is added with
+    /// `/item add` during setup.
+    #[serde(default)]
+    pub busy_effect_item: u32,
+    #[serde(default)]
+    pub busy_effect_skill: u32,
 }
 
 /// The client packet that asks a stablehand to revive the dead mate. The real protocol is still

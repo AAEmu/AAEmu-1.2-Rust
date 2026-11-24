@@ -23,11 +23,11 @@ Run the smoke test before the 100, 200, 300 and 500-player sweeps. The script us
 | Scenario | Current workload |
 | --- | --- |
 | Players | Fixed scene centered at 15562, 15354, 128. Bots spawn within 25 m of that point, rotate across the four r208022 races and run the existing GM-enabled busy scenario. Mate summon, NPC and doodad spawns, basic casts, buffs, movement and chat reuse the existing scenario. Mixed gear, gliding and player jumping are pending. |
-| Housing | Pending a verified fixture for several hundred varied houses with furnishings. |
+| Housing | `-Houses N` (default 300) finished small Nuian houses (templates 172-181) on an 18 m grid around the scene, six floor decorations each (house-owned doodads), written into the copied database before the game server starts; no bots. Heights use the scene z. |
+| Effects | The players crowd plus a firework (`-EffectItem` 15863 / `-EffectSkill` 13392 by default) used by every bot every tick through its item skill. |
+| Water | Busy bots at the sea point 15458, 10366, 100.5: every second bot summons a rowboat and steers it in a 12 m circle (`busy_boat_move`), the others swim. Larger ships remain open. |
+| Combined | Houses, the farm grid and the effects crowd at the land scene. The route teleports to the sea point at half time and back at three quarters (`transitions.tsv`); afterwards both transitions are timed to the confirmed position (`zone-transition.json`). |
 | Farming | Observer requests 200 GM doodad spawns on a grid using seven templates from the r208022 plant scenario. The grid uses default spawn phases. Count and placement require in-world verification. |
-| Effects | Pending validated AoE, siege and consumable effects. The players workload includes basic skills and buffs. |
-| Water | Runs the busy bots around the existing sea point at 15458, 10366, 100.5, with rowboat summons. Boat navigation, larger ships and swimming are pending. |
-| Combined | Pending the housing, effect and water fixtures and a validated zone boundary route. |
 
 ## Capture
 
@@ -49,8 +49,8 @@ The farming fixture uses the isolated server’s authenticated loopback
 Web API to place mixed r208022 grids and advance one crop group. It
 requires 200 newly observed object IDs. The run retains object IDs and
 phases, a client-side recognition count and a screenshot when available.
-Per-hitch attribution, automatic hang dumps and zone transition timing
-remain open.
+Automatic hang dumps remain open; stock runs attribute hitches with
+`-TraceFrames` and time zone transitions in the combined scene.
 
 ### Scene tracing
 
@@ -75,3 +75,12 @@ session first, moves the observer away from the scene, waits for the full
 fixture, and then takes the usual scene route. The series records the
 flag. Launcher-to-world time for a staged run measures an empty fixture
 and is recorded separately from crowded startup.
+
+### Stock patch sets and hitch traces
+
+Stock runs copy the driver into each attempt directory (`driver\aadriver.log`). `-Patch` passes a
+patch list to `aaemu-launcher --patch` (empty = the driver defaults, `none` = no patch), and
+`-LauncherArgs` adds launcher arguments. Every stock run sets `sys_sleep_background=0`: the hidden
+window has no focus, and the engine otherwise sleeps 40 ms per frame. `-TraceFrames` adds the
+driver's `diag-frame-trace`: main and render frame phases, and main and render thread stack samples
+taken only during frames over 50 ms, in `driver\frametrace-<pid>.tsv` and `aadriver.log`.
