@@ -72,8 +72,17 @@ int main(int argc, char** argv) {
     if (dir.empty()) { puts("perfpatch-verify: no client bin32 given (argument or AADRIVER_VERIFY_BIN32), skipped"); return 0; }
     int bad = 0, rows = 0;
     Image img[MODULE_COUNT];
+    char dumpDir[MAX_PATH] = "";
+    GetEnvironmentVariableA("AADRIVER_VERIFY_DUMP", dumpDir, MAX_PATH);
     for (int m = 0; m < MODULE_COUNT; ++m) {
-        img[m] = map_file(dir + "\\" + kModules[m].name);
+        if (kModules[m].packed) {
+            // Packed on disk: only an in-memory image (sections at their RVAs, e.g. the dev client's
+            // module_dump) has the code. Without one these rows are checked at run time only.
+            if (!*dumpDir) { printf("SKIPPED  %s (packed on disk; set AADRIVER_VERIFY_DUMP to a folder with r208022_%s)\n", kModules[m].name, kModules[m].name); continue; }
+            img[m] = map_file(std::string(dumpDir) + "\\r208022_" + kModules[m].name);
+        } else {
+            img[m] = map_file(dir + "\\" + kModules[m].name);
+        }
         if (!img[m].ok) { printf("MISSING  %s\n", kModules[m].name); ++bad; continue; }
         bool id = img[m].stamp == kModules[m].stamp && img[m].size == kModules[m].sizeOfImage && img[m].base == kModules[m].preferredBase;
         printf("%-8s %s stamp %08X size %08X base %08X\n", id ? "MODULE" : "WRONG", kModules[m].name, img[m].stamp, img[m].size, img[m].base);

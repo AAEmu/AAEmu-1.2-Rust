@@ -88,11 +88,10 @@ struct Cli {
 /// (`C:\aa-re\devclient\data\cvar-presets.tsv`); every name exists in the r208022 engine modules.
 fn cvar_preset(name: &str) -> anyhow::Result<&'static [(&'static str, &'static str)]> {
     Ok(match name {
-        // more texture requests in flight after a load, larger static-geometry stream pool
-        "streaming" => &[
-            ("r_TexturesStreamingMaxRequestedMB", "8"),
-            ("e_StreamCgfPoolSize", "128"),
-        ],
+        // more texture requests in flight after a load. (The r223748 value e_StreamCgfPoolSize=128 is
+        // left out: r208022's default is 150, and the lower pool made 2 of 3 live farm runs exit at the
+        // character lobby, lane client-perf/measure.)
+        "streaming" => &[("r_TexturesStreamingMaxRequestedMB", "8")],
         // vegetation drawn to a shorter distance (main-thread culling and the instancing loop)
         "view-near" => &[("e_view_dist_ratio_vegetation", "20")],
         _ => bail!("unknown --cvar-preset '{name}' (streaming, view-near)"),

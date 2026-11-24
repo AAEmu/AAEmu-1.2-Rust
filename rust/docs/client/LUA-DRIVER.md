@@ -1085,6 +1085,7 @@ Deployment:
 ## 15. Performance patch set
 
 `native/perfpatch.cpp` is a table of in-memory patches and hooks for the r208022 engine modules
+`CryPhysics.dll` (`0x543CB771`, `0x75B400`, VMProtect-packed on disk; checked in memory),
 `crysystem.dll` (timestamp `0x543CB856`, size `0x169000`) and `cryrenderd3d10.dll`
 (`0x543CB89C`, `0x549000`). Both builds of the driver (diagnostic and `AADRIVER_PLAYER`) carry
 it. Every site in `native/perfsites.h` is checked byte for byte before a write, and a mismatch
@@ -1111,8 +1112,26 @@ already running only gets one-byte patches and IAT swaps, and the multi-byte cod
 | `pak-findchild-index` | off | hash index for directory children during the catalogue load |
 | `pak-prefetch` | off | background read of the last `prefetch_mb` (96) MB of `game_pak` (cold cache) |
 | `diag-resources` | off | every `diag_interval_s` (60) s: handles, GDI/USER objects, private bytes, free and largest free address space |
+| `physics-role-guard` | on | CryPhysics crash fix (below): only the thread that steps the physics world holds iCaller 0 |
+| `diag-physics-role` | off | logs which threads step physics and hold iCaller 0; 2 ms role samples (`aaemu-clientdriver perf`) |
+| `diag-frame-trace` | off | main/render frame phases; stack samples of both threads while a frame is over `trace_budget_ms` (50), in `frametrace-<pid>.tsv` |
+| `diag-fulldump` | off | one full-memory dump next to the driver on the first access violation in CryPhysics or Cry3DEngine |
 
-The default-on rows are the six patches the r208022 dev client has applied in live runs.
+The default-on rows are the six patches the r208022 dev client has applied in live runs, and
+`physics-role-guard`. `frame-latency 1` smooths a light scene (farm p99 20 -> 16 ms) but
+regresses CPU-bound crowds (300 players: p99 59 -> 103 ms), so it stays off.
+
+**CryPhysics guard.** CryPhysics keeps per-caller scratch buffers indexed by `iCaller`. That is
+0 for the physics thread and 4 for every other thread (locked). `TracePendingRays` (world vtable
+slot 44) starts with `MarkAsPhysThread`, which hands iCaller 0 to its caller without waiting for
+the previous owner. The main thread calls it every frame. Its slot-34 "unmark" hands the role
+back to the main thread's cell. Two threads then share the unlocked buffers: the
+`CryPhysics+0x1689BE`, `+0xAD1DB` and BV-tree crashes. The guard wraps slots 33, 34 and 44 in a
+heap copy of the world's vtable (`gEnv->pPhysicalWorld`); no CryPhysics byte changes, because
+the engine's protector rejects code changes there. `TracePendingRays` from any thread other than
+the stepping thread runs with its TLS and the role pointer parked on a private cell pair
+(iCaller 4). An unmark parks the role on an ownerless cell, so the next step takes it from
+nobody. Evidence: `C:\aa-re\notes\client-perf-r208022.md`.
 
 **Switches**, later wins: the table defaults, then `aadriver.ini` next to the DLL (`[perf]
 patches=...`), then `%AADRIVER_PATCHES%`, then `-aaemu-patches=` on the client command line. The
@@ -1140,5 +1159,7 @@ switches, compares the `_splitpath` replacement with the CRT (including code pag
 the child index against a linear search, and runs the flush waits, jump hooks and the whole
 per-module apply path on synthetic module images. `perf-sites.exe <client>\bin32`, or
 `AADRIVER_VERIFY_BIN32` during the build, checks every site, IAT slot and redirected operand
-against the client files on disk. The executables have no "patch" in their names, because
+against the client files on disk. CryPhysics is packed on disk: its rows are checked against an
+in-memory image when `AADRIVER_VERIFY_DUMP` names a folder with `r208022_CryPhysics.dll` (for
+example the dev client's `module_dump`), and at run time otherwise. The executables have no "patch" in their names, because
 Windows installer detection would otherwise ask for elevation.

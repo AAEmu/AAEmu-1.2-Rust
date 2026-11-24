@@ -10,12 +10,16 @@
 
 namespace perfsites {
 
-enum Module { CRYSYSTEM = 0, CRYRENDER = 1, MODULE_COUNT = 2 };
+enum Module { CRYSYSTEM = 0, CRYRENDER = 1, CRYPHYSICS = 2, MODULE_COUNT = 3 };
 
-struct ModuleId { const char* name; const wchar_t* wname; uint32_t stamp; uint32_t sizeOfImage; uint32_t preferredBase; };
+// packed: the file on disk is VMProtect-packed; its code only exists in memory after the module's
+// DllMain. Its sites are checked at run time and, statically, against an in-memory image dump
+// (perfpatch-verify AADRIVER_VERIFY_DUMP), never against the file.
+struct ModuleId { const char* name; const wchar_t* wname; uint32_t stamp; uint32_t sizeOfImage; uint32_t preferredBase; bool packed; };
 static const ModuleId kModules[MODULE_COUNT] = {
-    { "crysystem.dll", L"crysystem.dll", 0x543CB856, 0x169000, 0x36500000 },
-    { "cryrenderd3d10.dll", L"cryrenderd3d10.dll", 0x543CB89C, 0x549000, 0x38000000 },
+    { "crysystem.dll", L"crysystem.dll", 0x543CB856, 0x169000, 0x36500000, false },
+    { "cryrenderd3d10.dll", L"cryrenderd3d10.dll", 0x543CB89C, 0x549000, 0x38000000, false },
+    { "CryPhysics.dll", L"CryPhysics.dll", 0x543CB771, 0x75B400, 0x34FF0000, true },
 };
 
 // bytes == nullptr: a check only (hook prologue, call site, loop shape).
@@ -56,6 +60,10 @@ static const Site kSites[] = {
       0, nullptr, "WaitFlushCond entry (thiscall, no stack arguments): waker hook" },
     { "render-thread-event-sync", CRYRENDER, 0x199610, "55 8B EC 64 A1 00 00 00 00 6A FF 68 ?? ?? ?? ?? 50 64 89 25 00 00 00 00 83 EC 6C",
       0, nullptr, "SyncMainWithRender entry (thiscall, no stack arguments): waker hook" },
+    { "diag-frame-trace", CRYRENDER, 0x1958F0, "55 8B EC 64 A1 00 00 00 00 6A FF 68 ?? ?? ?? ?? 50 64 89 25 00 00 00 00 83 EC 68",
+      0, nullptr, "WaitFlushCond entry: render thread idle until the main thread hands over a frame (frame-trace timestamps)" },
+    { "diag-frame-trace", CRYRENDER, 0x199610, "55 8B EC 64 A1 00 00 00 00 6A FF 68 ?? ?? ?? ?? 50 64 89 25 00 00 00 00 83 EC 6C",
+      0, nullptr, "SyncMainWithRender entry: once per main frame (frame-trace timestamps)" },
     { "render-thread-event-sync", CRYRENDER, 0x1998CF, "89 7E 20", 0, nullptr,
       "SyncMainWithRender: m_nFlush = 1 (the only set; render loop clears it at +0x19CA56 / +0x19CCB0)" },
     { "pak-catalog-scope", CRYSYSTEM, 0x13C60, "55 8B EC 6A FF 68 ?? ?? ?? ?? 64 A1 00 00 00 00 50 81 EC 50 04 00 00", 0, nullptr,
@@ -64,7 +72,53 @@ static const Site kSites[] = {
       "DirNode::FindChild (FUN_36517720): EAX = node, [esp+4] = name, ret 4" },
     { "pak-findchild-index", CRYSYSTEM, 0x177D0, "55 8B EC 6A FF 68", 0, nullptr,
       "DirNode::AddChild (FUN_365177D0): push_back before the list sentinel, count +0x14 incremented" },
+
+    // ---- CryPhysics (packed on disk; bytes from the in-memory image, base 0x34FF0000) ----
+    // Check-only rows. The engine modules' code protector detects any CryPhysics code change (live
+    // 2026-11-23: a 74-byte patch and a 9-byte entry hook both ended in an illegal instruction at
+    // mscms+0x48E00 during start-up, also when written after CryEntitySystem's DllMain), so the guard
+    // replaces vtable slots in a heap copy of the physics world's vtable and changes no image byte.
+    // Absolute operands are not wildcards: the rows also pin the cell addresses the guard relies on.
+    { "physics-role-guard", CRYPHYSICS, 0x1D3F70,
+      "55 8B EC 6A FF 68 ?? ?? ?? ?? 64 A1 00 00 00 00 50 64 89 25 00 00 00 00 81 EC 0C 01 00 00 53 56 33 F6 57 6A 01 8B D9",
+      0, nullptr, "CPhysicalWorld::TracePendingRays (FUN_351C3F70, slot 44, thiscall int bDoTracing): push 1 for MarkAsPhysThread" },
+    { "physics-role-guard", CRYPHYSICS, 0x1D3FB2, "E8 19 E8 EB FF A1 14 D8 20 35", 0, nullptr,
+      "TracePendingRays: call MarkAsPhysThread(1) (FUN_350827D0), then iCaller from TLS 0x3520D814" },
+    { "physics-role-guard", CRYPHYSICS, 0x927D0,
+      "55 8B EC A1 14 D8 20 35 50 FF 15 9C 1A FF 34 80 7D 08 00 8B 0D 00 41 20 35 74 39 3B C1 74 6D 8B D1 81 EA F8 40 20 35 "
+      "83 F2 04 C1 FA 02 8D 04 95 F8 40 20 35 C7 01 04 00 00 00 50 C7 00 00 00 00 00 A3 00 41 20 35 A1 14 D8 20 35 50 FF 15 A4 1A",
+      0, nullptr, "MarkAsPhysThread(1): if (TLS != *cur) { **cur = 4; other = 0x352040F8 + ((*cur - 0x352040F8) ^ 4); *other = 0; *cur = other; TLS = other }" },
+    { "physics-role-guard", CRYPHYSICS, 0x98520,
+      "A1 14 D8 20 35 50 FF 15 9C 1A FF 34 8B 0D 00 41 20 35 3B C1 75 34 81 E9 F8 40 20 35 83 F1 04 C1 F9 02 8D 0C 8D F8 40 20 35 "
+      "C7 00 04 00 00 00 89 0D 00 41 20 35 C7 01 00 00 00 00 8B 0D 14 D8 20 35 6A 00 51 FF 15 A4 1A FF 34 C3",
+      0, nullptr, "world slot 34 unmark: if (TLS == *cur) { *TLS = 4; *cur = partner; *partner = 0; TLS = NULL } (hands the role to the partner cell)" },
+    { "physics-role-guard", CRYPHYSICS, 0xAFB3B,
+      "76 4D 8B 15 14 D8 20 35 52 FF 15 9C 1A FF 34 8B 0D 00 41 20 35 3B C1 74 33 8B C1 2D F8 40 20 35 83 F0 04 "
+      "C1 F8 02 8D 04 85 F8 40 20 35 C7 01 04 00 00 00 C7 00 00 00 00 00 8B 0D 14 D8 20 35 50 51 A3 00 41 20 35 "
+      "FF 15 A4 1A FF 34 0F 57 C0",
+      0, nullptr, "CPhysicalWorld::TimeStep (FUN_3509F6A0, slot 33): the same take inline, for dt > 0 (same partner rule)" },
+    { "physics-role-guard", CRYPHYSICS, 0xB01B5, "8B 5D 0C C6 45 FC 08 76 50 F7 C3 00 08 00 00 75 48 A1 14 D8 20 35", 0, nullptr,
+      "TimeStep: second inline take, if (dt > 0 && !(flags & ent_flagged_only))" },
+    { "diag-physics-role", CRYPHYSICS, 0xAF6A0,
+      "55 8B EC 64 A1 00 00 00 00 6A FF 68 ?? ?? ?? ?? 50 64 89 25 00 00 00 00 81 EC 10 03 00 00", 0, nullptr,
+      "CPhysicalWorld::TimeStep entry (thiscall float dt, int flags; ret 8): role trace" },
+    { "diag-physics-role", CRYPHYSICS, 0x1D3F70,
+      "55 8B EC 6A FF 68 ?? ?? ?? ?? 64 A1 00 00 00 00 50 64 89 25 00 00 00 00 81 EC 0C 01 00 00 53 56 33 F6 57 6A 01 8B D9",
+      0, nullptr, "TracePendingRays entry: role trace" },
 };
+
+// CryPhysics data (RVAs): the two iCaller cells (0x352040F8/FC, values 0 = physics thread, 4 =
+// MAX_PHYS_THREADS = any other thread), the pointer to the current physics thread's cell, the TLS index.
+static const uint32_t kPhysRoleCells = 0x2140F8, kPhysRoleCurrent = 0x214100, kPhysTlsIndex = 0x21D814;
+// CPhysicalWorld vtable (IPhysicalWorld): TimeStep is slot 33, PrimitiveWorldIntersection slot 64.
+static const uint32_t kPhysWorldVtable = 0x20C598, kPhysTimeStepSlot = 33, kPhysTimeStep = 0xAF6A0;
+// TracePendingRays (slot 44, FUN_351C3F70, thiscall int bDoTracing, ret 4) starts with MarkAsPhysThread.
+static const uint32_t kPhysTraceRaysSlot = 44, kPhysTraceRays = 0x1D3F70;
+// Unmark (slot 34, FUN_35088520, thiscall, no arguments): hands the caller's role to the partner cell.
+static const uint32_t kPhysUnmarkSlot = 34, kPhysUnmark = 0x98520;
+// gEnv (SSystemGlobalEnvironment*) lives at CryScriptSystem+0x81EF4 (as aadriver.cpp RVA_gEnv);
+// gEnv->pPhysicalWorld is at +0x38 (live: vptr 0x351FC598).
+static const uint32_t kCssGEnv = 0x81EF4, kGEnvPhysicalWorld = 0x38;
 
 // IAT slots the hooks replace. The runtime finds the slot by import name and requires it to be
 // this RVA, and the static verifier checks the import name at the RVA.

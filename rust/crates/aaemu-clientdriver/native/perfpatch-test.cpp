@@ -412,6 +412,99 @@ static void test_resources_line() {
     CHECK(l.find("heaps=0 ") == std::string::npos);
 }
 
+// ---- physics-role-guard: engine MarkAsPhysThread semantics on a fake CryPhysics image ----------
+static BYTE* g_fakePhys;
+static HANDLE g_ownerReady, g_ownerGo, g_ownerDone;
+static volatile LONG g_ownerQuit;
+static int g_ownerSaw = -1;
+// The engine's MarkAsPhysThread(1) (0x350827D0), with the cell base of the fake image.
+static void fake_mark(BYTE* base) {
+    DWORD idx = *(DWORD*)(base + kPhysTlsIndex);
+    void** cur = (void**)(base + kPhysRoleCurrent);
+    uintptr_t x = (uintptr_t)(base + kPhysRoleCells);
+    if (TlsGetValue(idx) != *cur) {
+        LONG* c = (LONG*)*cur;
+        LONG* other = (LONG*)(x + (((uintptr_t)c - x) ^ 4));
+        *c = 4; *other = 0; *cur = other; TlsSetValue(idx, other);
+    }
+}
+static int fake_icaller(BYTE* base) { void* p = TlsGetValue(*(DWORD*)(base + kPhysTlsIndex)); return p ? *(LONG*)p : 4; }
+// TracePendingRays: MarkAsPhysThread(1), then use iCaller; arg 7 lets the owner step meanwhile.
+static int __fastcall fake_trace_rays(void*, void*, int arg) {
+    fake_mark(g_fakePhys);
+    int me = fake_icaller(g_fakePhys);
+    if (arg == 7) { SetEvent(g_ownerGo); WaitForSingleObject(g_ownerDone, 5000); }
+    return 100 + me;
+}
+// The engine's unmark (world slot 34, 0x35088520): hand the caller's role to the partner cell.
+static void __fastcall fake_unmark(void*, void*) {
+    BYTE* base = g_fakePhys;
+    DWORD idx = *(DWORD*)(base + kPhysTlsIndex);
+    void** cur = (void**)(base + kPhysRoleCurrent);
+    uintptr_t x = (uintptr_t)(base + kPhysRoleCells);
+    LONG* mine = (LONG*)TlsGetValue(idx);
+    if (mine == *cur) { LONG* other = (LONG*)(x + (((uintptr_t)mine - x) ^ 4)); *mine = 4; *cur = other; *other = 0; TlsSetValue(idx, nullptr); }
+}
+static volatile LONG g_ownerCmd;       // 0 mark (a step), 1 unmark through the guard, 2 TracePendingRays through the guard
+static volatile DWORD g_ownerTid;
+static unsigned __stdcall owner_thread(void*) {
+    LONG* cells = (LONG*)(g_fakePhys + kPhysRoleCells);
+    TlsSetValue(*(DWORD*)(g_fakePhys + kPhysTlsIndex), &cells[0]);
+    g_ownerTid = GetCurrentThreadId();
+    SetEvent(g_ownerReady);
+    while (WaitForSingleObject(g_ownerGo, 5000) == WAIT_OBJECT_0 && !g_ownerQuit) {
+        if (g_ownerCmd == 1) hk_unmark(nullptr, nullptr);
+        else if (g_ownerCmd == 2) hk_trace_rays(nullptr, nullptr, 0);
+        else fake_mark(g_fakePhys);       // the owner's own step takes the role (TimeStep inline take)
+        g_ownerSaw = fake_icaller(g_fakePhys);
+        SetEvent(g_ownerDone);
+    }
+    return 0;
+}
+static void owner_do(LONG cmd) { g_ownerCmd = cmd; g_ownerSaw = -1; SetEvent(g_ownerGo); WaitForSingleObject(g_ownerDone, 5000); }
+static void test_physics_role_guard() {
+    g_fakePhys = (BYTE*)VirtualAlloc(NULL, 0x220000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    DWORD idx = TlsAlloc();
+    *(DWORD*)(g_fakePhys + kPhysTlsIndex) = idx;
+    LONG* cells = (LONG*)(g_fakePhys + kPhysRoleCells);
+    cells[0] = 0; cells[1] = 4;
+    *(void**)(g_fakePhys + kPhysRoleCurrent) = &cells[0];
+    g_physBase = g_fakePhys; g_raysOriginal = (RaysFn)(void*)&fake_trace_rays; g_unmarkOriginal = (VoidFn)(void*)&fake_unmark;
+    InitializeCriticalSection(&g_parkLock);
+    g_ownerReady = CreateEventW(NULL, FALSE, FALSE, NULL); g_ownerGo = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g_ownerDone = CreateEventW(NULL, FALSE, FALSE, NULL);
+    HANDLE t = (HANDLE)_beginthreadex(NULL, 0, owner_thread, NULL, 0, NULL);
+    WaitForSingleObject(g_ownerReady, 5000);
+    g_stepper = g_ownerTid;              // the owner thread is the stepping (physics) thread
+    void** cur = (void**)(g_fakePhys + kPhysRoleCurrent);
+    // 1. guarded: this thread runs as iCaller 4, the owner keeps the role and its cell
+    g_roleGuard = true;
+    CHECK(hk_trace_rays(nullptr, nullptr, 0) == 104);
+    CHECK(*cur == &cells[0] && cells[0] == 0 && cells[1] == 4 && TlsGetValue(idx) == nullptr && g_guarded == 1);
+    // 2. the owner steps during the guarded call: it moves into the private pair and still sees 0
+    CHECK(hk_trace_rays(nullptr, nullptr, 7) == 104);
+    CHECK(g_ownerSaw == 0 && g_guardMoved == 1 && *cur == (void*)&g_park[0][1] && g_park[0][1] == 0 && fake_icaller(g_fakePhys) == 4);
+    // 3. guarded again with the owner on the private pair: the other pair parks, the owner stays
+    CHECK(hk_trace_rays(nullptr, nullptr, 0) == 104);
+    CHECK(*cur == (void*)&g_park[0][1] && g_park[0][1] == 0 && g_guarded == 3 && TlsGetValue(idx) == nullptr);
+    // 4. the owner itself is never parked
+    owner_do(0);
+    CHECK(g_ownerSaw == 0 && *cur == (void*)&g_park[0][1]);
+    owner_do(2);
+    CHECK(g_ownerSaw == 0 && *cur == (void*)&g_park[0][1]);
+    // 5. the owner unmarks: the role is parked ownerless instead of going to the partner cell
+    owner_do(1);
+    CHECK(g_ownerSaw == 4 && *cur == (void*)&g_phantom[0] && g_phantom[0] == 0 && g_park[0][1] == 4 && g_unmarksParked == 1);
+    CHECK(hk_trace_rays(nullptr, nullptr, 0) == 104 && *cur == (void*)&g_phantom[0]);   // not the stepper: parked
+    owner_do(2);                                                                          // the stepper takes it from nobody
+    CHECK(g_ownerSaw == 0 && *cur == (void*)&g_phantom[1] && g_phantom[0] == 4);
+    // 6. guard off: the engine behaviour, this thread takes iCaller 0 from the owner
+    g_roleGuard = false;
+    CHECK(hk_trace_rays(nullptr, nullptr, 0) == 100 && TlsGetValue(idx) == *cur && g_phantom[1] == 4);
+    g_ownerQuit = 1; SetEvent(g_ownerGo); WaitForSingleObject(t, 5000); CloseHandle(t);
+    TlsSetValue(idx, nullptr); TlsFree(idx);
+}
+
 int main() {
     test_patterns();
     test_switches();
@@ -424,7 +517,8 @@ int main() {
     test_apply_path();
     test_first_tick();
     test_resources_line();
+    test_physics_role_guard();
     if (g_failures) { fprintf(stderr, "%d perfpatch check(s) failed\n", g_failures); return 1; }
-    puts("perfpatch patterns, switches, splitpath, mode key, child index, waits, hooks, apply path and first tick passed");
+    puts("perfpatch patterns, switches, splitpath, mode key, child index, waits, hooks, apply path, first tick and physics role guard passed");
     return 0;
 }

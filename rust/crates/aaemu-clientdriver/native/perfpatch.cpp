@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
+#include <share.h>
 #include "perfcore.h"
 #include "perfsites.h"
 #include "perfpatch.h"
@@ -41,7 +43,7 @@ namespace perfpatch {
 enum State { PENDING = 0, APPLIED, PRESENT, REFUSED, OFF };
 static const char* kStateNames[] = { "pending", "applied", "present", "refused", "off" };
 
-enum Kind { BYTES, HOOK, THREAD, EXTERNAL };
+enum Kind { BYTES, HOOK, THREAD, EXTERNAL, WORLD /* physics world vtable copy, installed by world_thread */ };
 struct Patch {
     const char* id;
     int module;          // perfsites::Module, -1 for none
@@ -51,7 +53,8 @@ struct Patch {
     const char* effect;
 };
 
-// Defaults: on only for the patches the r208022 dev client has applied in live runs.
+// Defaults: on for the six patches the r208022 dev client has applied in live runs, and for
+// physics-role-guard (the CryPhysics crash fix, measured live in lane client-perf/measure).
 static const Patch kPatches[] = {
     { "pak-readahead-64k", CRYSYSTEM, BYTES, true, false, "small pak reads fill 64 KiB instead of a whole 1 MiB window" },
     { "cpuspeed-sleep10", CRYSYSTEM, BYTES, true, false, "CPU-speed probe sleeps 10 ms instead of 100 ms" },
@@ -66,6 +69,10 @@ static const Patch kPatches[] = {
     { "pak-findchild-index", CRYSYSTEM, HOOK, false, true, "hash index for directory children during the pak catalogue load" },
     { "pak-prefetch", -1, THREAD, false, false, "background read of the pak catalogue area (cold cache only)" },
     { "diag-resources", -1, THREAD, false, false, "logs handles, GDI/USER objects, private bytes and free address space" },
+    { "physics-role-guard", CRYPHYSICS, WORLD, true, false, "only the stepping physics thread holds CryPhysics iCaller 0 (TracePendingRays parked, unmark ownerless)" },
+    { "diag-physics-role", CRYPHYSICS, WORLD, false, false, "logs which threads step physics and take the physics-thread role" },
+    { "diag-frame-trace", CRYRENDER, HOOK, false, true, "frame phases and main/render stack samples during frames over trace_budget_ms (frametrace-<pid>.tsv)" },
+    { "diag-fulldump", -1, THREAD, false, false, "full-memory dump next to the driver on the first access violation in an engine module" },
 };
 static const int kPatchCount = sizeof kPatches / sizeof kPatches[0];
 
@@ -88,6 +95,7 @@ static bool g_attached;
 static perfcore::Switches g_switches;
 static std::vector<std::pair<std::string, std::string>> g_cvars;
 static int g_tickStage;
+static HMODULE g_self;
 static BYTE* g_thunks;     // executable page for trampolines
 static size_t g_thunkUsed;
 
@@ -252,6 +260,12 @@ static void apply_bytes(int i, BYTE* base, bool late) {
         set_state(i, REFUSED, b); return;
     }
     if (late && perfcore::changed_bytes(base + s->patchRva, bytes) > 1) { set_state(i, REFUSED, "module was running before the driver attached (multi-byte code change)"); return; }
+    // extra check-only rows of the same id (preconditions the patch relies on)
+    for (const Site& x : kSites) {
+        if (strcmp(x.id, kPatches[i].id) != 0 || x.bytes) continue;
+        std::string why;
+        if (!site_ok(base, x.id, x.rva, why)) { set_state(i, REFUSED, why.c_str()); return; }
+    }
     BYTE* at = base + s->patchRva;
     memcpy(g_status[i].original, at, bytes.v.size());
     g_status[i].len = bytes.v.size(); g_status[i].at = at;
@@ -348,6 +362,7 @@ static FARPROC WINAPI hk_get_proc_address(HMODULE m, LPCSTR name) {
 static int g_spins = 256;
 typedef void (__thiscall* ThisCall)(void*);
 static ThisCall g_syncTrampoline, g_waitFlushTrampoline;
+static bool g_syncWake;      // render-thread-event-sync wakers on (the hooks are shared with diag-frame-trace)
 
 static void __stdcall main_wait(volatile LONG* flag) { perfcore::wait_while_nonzero(flag, g_spins, 1, g_waitOnAddress); }
 static void __stdcall render_wait(volatile LONG* flag) { perfcore::wait_while(flag, 0, g_spins, 1, g_waitOnAddress); }
@@ -376,13 +391,74 @@ static __declspec(naked) BOOL WINAPI render_yield_stub() {
 static void* g_mainCell = (void*)&main_yield_stub;
 static void* g_renderCell = (void*)&render_yield_stub;
 
+// ---- diag-frame-trace ----------------------------------------------------------------------------
+// Frame phases from the two render-thread sync points (main: SyncMainWithRender once per frame; render:
+// WaitFlushCond, idle until the main thread hands over a frame), and EBP-chain stack samples of the
+// main and render threads, taken only while the current frame is over budget. A sampler thread checks
+// every trace_period_ms (2): if the running main (or render) frame is older than trace_budget_ms (50),
+// it suspends that thread, reads its context, walks saved EBP frames inside the thread's own stack
+// bounds (no stack scan, no allocation, no lock while the thread is suspended) and resumes it. When
+// the long frame ends it writes the hitch (duration, phases, samples, top return addresses) to
+// aadriver.log and every sample to frametrace-<pid>.tsv beside the driver.
+static bool g_traceOn;
+static LARGE_INTEGER g_qpf;
+static volatile LONGLONG g_mainStart, g_mainSyncIn, g_mainLastLen, g_mainLastSync;  // QPC
+static volatile LONG g_mainFrames;
+static volatile DWORD g_mainThreadId, g_renderThreadId;
+static volatile LONGLONG g_renderBusySince, g_renderWaitIn;   // render: busy from WaitFlushCond exit to next entry
+static volatile LONG g_renderFrames;
+static volatile LONGLONG g_renderLastBusy, g_renderLastWait;
+
+static double qpc_ms(LONGLONG d) { return d * 1000.0 / (double)g_qpf.QuadPart; }
+static LONGLONG qpc_now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+
+static void trace_main_sync_enter() {
+    if (!g_mainThreadId) g_mainThreadId = GetCurrentThreadId();
+    g_mainSyncIn = qpc_now();
+}
+static void trace_main_sync_leave() {
+    LONGLONG now = qpc_now();
+    g_mainLastSync = now - g_mainSyncIn;
+    g_mainLastLen = g_mainStart ? now - g_mainStart : 0;
+    g_mainStart = now;
+    InterlockedIncrement(&g_mainFrames);
+}
+static void trace_render_wait_enter() {
+    if (!g_renderThreadId) g_renderThreadId = GetCurrentThreadId();
+    LONGLONG now = qpc_now();
+    if (g_renderBusySince) g_renderLastBusy = now - g_renderBusySince;
+    g_renderBusySince = 0;
+    g_renderWaitIn = now;
+}
+static void trace_render_wait_leave() {
+    LONGLONG now = qpc_now();
+    g_renderLastWait = now - g_renderWaitIn;
+    g_renderBusySince = now;
+    InterlockedIncrement(&g_renderFrames);
+}
+
 static void __fastcall hk_sync_main(void* self, void*) {
+    if (g_traceOn) trace_main_sync_enter();
     g_syncTrampoline(self);
-    g_wakeAll((BYTE*)self + 0x20);       // m_nFlush just became 1: wake the render thread
+    if (g_wakeAll && g_syncWake) g_wakeAll((BYTE*)self + 0x20);   // m_nFlush just became 1: wake the render thread
+    if (g_traceOn) trace_main_sync_leave();
 }
 static void __fastcall hk_wait_flush(void* self, void*) {
-    g_wakeAll((BYTE*)self + 0x20);       // the render loop cleared m_nFlush just before this call
+    if (g_traceOn) trace_render_wait_enter();
+    if (g_wakeAll && g_syncWake) g_wakeAll((BYTE*)self + 0x20);   // the render loop cleared m_nFlush just before this call
     g_waitFlushTrampoline(self);
+    if (g_traceOn) trace_render_wait_leave();
+}
+
+// The two jump hooks are shared by render-thread-event-sync (wakers) and diag-frame-trace (timestamps).
+static bool install_sync_hooks(BYTE* base, const char* id, std::string& why) {
+    if (g_syncTrampoline) return true;
+    if (!site_ok(base, id, 0x1958F0, why) || !site_ok(base, id, 0x199610, why)) return false;
+    g_waitFlushTrampoline = (ThisCall)jump_hook(base + 0x1958F0, 9, (void*)&hk_wait_flush);
+    if (!g_waitFlushTrampoline) { why = "WaitFlushCond hook failed"; return false; }
+    g_syncTrampoline = (ThisCall)jump_hook(base + 0x199610, 9, (void*)&hk_sync_main);
+    if (!g_syncTrampoline) { why = "SyncMainWithRender hook failed"; return false; }
+    return true;
 }
 
 static int install_render_sync(BYTE* base, std::string& why) {
@@ -397,12 +473,195 @@ static int install_render_sync(BYTE* base, std::string& why) {
     void** renderOperand = (void**)(base + 0x1959FD);
     if (*mainOperand != (void*)slot || *renderOperand != (void*)slot) { why = "call operands do not point at the SwitchToThread slot"; return -1; }
     // wakers first: a waiting thread without a waker still ends after 1 ms
-    g_waitFlushTrampoline = (ThisCall)jump_hook(base + 0x1958F0, 9, (void*)&hk_wait_flush);
-    if (!g_waitFlushTrampoline) { why = "WaitFlushCond hook failed"; return -1; }
-    g_syncTrampoline = (ThisCall)jump_hook(base + 0x199610, 9, (void*)&hk_sync_main);
-    if (!g_syncTrampoline) { why = "SyncMainWithRender hook failed (WaitFlushCond waker stays, harmless)"; return -1; }
+    g_syncWake = true;
+    if (!install_sync_hooks(base, "render-thread-event-sync", why)) return -1;
     void* mainCell = &g_mainCell; void* renderCell = &g_renderCell;
     if (!write_code((BYTE*)mainOperand, &mainCell, 4) || !write_code((BYTE*)renderOperand, &renderCell, 4)) { why = "operand write failed"; return -1; }
+    return 1;
+}
+
+// Stack bounds of another thread (TEB StackBase +4, StackLimit +8).
+typedef LONG (NTAPI* QueryThreadFn)(HANDLE, int, void*, ULONG, ULONG*);
+static QueryThreadFn g_queryThread;
+static BYTE* thread_teb(HANDLE h) {
+    if (!g_queryThread) return nullptr;
+    struct { LONG exitStatus; BYTE* teb; DWORD pid, tidc; ULONG_PTR affinity; LONG prio, basePrio; } tbi = {};
+    return g_queryThread(h, 0, &tbi, sizeof tbi, NULL) >= 0 ? tbi.teb : nullptr;
+}
+
+enum { kTraceDepth = 24, kTraceMaxSamples = 1024 };
+struct TraceSample { LONGLONG at; char thread; BYTE depth; uint32_t pc[kTraceDepth]; };
+static TraceSample* g_samples;     // kTraceMaxSamples, preallocated
+struct TracedThread { DWORD tid; HANDLE h; uintptr_t stackLow, stackHigh; };
+
+static bool open_traced(TracedThread& t, DWORD tid) {
+    if (t.tid == tid && t.h) return true;
+    if (t.h) CloseHandle(t.h);
+    t = TracedThread();
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+    if (!h) return false;
+    BYTE* teb = thread_teb(h);
+    if (!teb) { CloseHandle(h); return false; }
+    t.tid = tid; t.h = h;
+    t.stackHigh = *(uintptr_t*)(teb + 4); t.stackLow = *(uintptr_t*)(teb + 8);
+    return true;
+}
+// Suspend, read EIP/EBP/ESP, walk saved frames within [esp, stackHigh), resume. Nothing else runs
+// while the thread is suspended: no allocation, no lock, no call that could wait on it.
+static bool sample_thread(TracedThread& t, char tag, TraceSample& s) {
+    CONTEXT c; c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (SuspendThread(t.h) == (DWORD)-1) return false;
+    bool ok = GetThreadContext(t.h, &c) != 0;
+    int n = 0;
+    if (ok) {
+        s.pc[n++] = c.Eip;
+        uintptr_t ebp = c.Ebp, low = c.Esp;
+        while (n < kTraceDepth && ebp >= low && ebp + 8 <= t.stackHigh && !(ebp & 3)) {
+            uintptr_t next = *(uintptr_t*)ebp, ret = *(uintptr_t*)(ebp + 4);
+            if (ret < 0x10000) break;
+            s.pc[n++] = (uint32_t)ret;
+            if (next <= ebp) break;
+            low = ebp + 8; ebp = next;
+        }
+    }
+    ResumeThread(t.h);
+    s.at = qpc_now(); s.thread = tag; s.depth = (BYTE)n;
+    return ok && n > 0;
+}
+
+struct ModRange { uintptr_t lo, hi; char name[24]; };
+static ModRange g_modRanges[512];
+static int g_modCount;
+static void refresh_modules() {
+    HMODULE mods[512]; DWORD need = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return;
+    int n = 0;
+    for (DWORD i = 0; i < need / sizeof(HMODULE) && i < 512 && n < 512; ++i) {
+        MODULEINFO mi; char name[64];
+        if (!GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof mi) || !GetModuleBaseNameA(GetCurrentProcess(), mods[i], name, sizeof name)) continue;
+        g_modRanges[n].lo = (uintptr_t)mi.lpBaseOfDll; g_modRanges[n].hi = g_modRanges[n].lo + mi.SizeOfImage;
+        strncpy_s(g_modRanges[n].name, name, _TRUNCATE);
+        if (char* dot = strrchr(g_modRanges[n].name, '.')) *dot = 0;
+        ++n;
+    }
+    g_modCount = n;
+}
+static std::string where(uint32_t pc) {
+    char b[48];
+    for (int i = 0; i < g_modCount; ++i)
+        if (pc >= g_modRanges[i].lo && pc < g_modRanges[i].hi) { _snprintf_s(b, sizeof b, _TRUNCATE, "%s+0x%X", g_modRanges[i].name, (unsigned)(pc - g_modRanges[i].lo)); return b; }
+    _snprintf_s(b, sizeof b, _TRUNCATE, "0x%08X", pc);
+    return b;
+}
+static bool is_system(uint32_t pc) {
+    for (int i = 0; i < g_modCount; ++i)
+        if (pc >= g_modRanges[i].lo && pc < g_modRanges[i].hi) {
+            const char* n = g_modRanges[i].name;
+            return !_stricmp(n, "ntdll") || !_stricmp(n, "KERNELBASE") || !_stricmp(n, "kernel32") || !_stricmp(n, "win32u") || !_stricmp(n, "user32");
+        }
+    return false;
+}
+
+static volatile LONG g_hitches;
+static FILE* g_traceFile;
+// Summarise one long frame: per thread, the return addresses present in the most samples (inclusive).
+// Summarise one long frame: per thread, the most frequent leaf chains (the first three frames outside
+// ntdll/kernel/user32 of each sample, innermost first), as a share of that thread's samples.
+static void finish_hitch(int frame, double ms, double syncMs, double renderBusyMs, double renderWaitMs, int nSamples) {
+    LONG k = InterlockedIncrement(&g_hitches);
+    refresh_modules();
+    std::string top[2];
+    for (int th = 0; th < 2; ++th) {
+        char tag = th ? 'R' : 'M';
+        std::map<std::string, int> chains; int total = 0;
+        for (int i = 0; i < nSamples; ++i) {
+            if (g_samples[i].thread != tag) continue;
+            ++total;
+            std::string key; int used = 0;
+            for (int d = 0; d < g_samples[i].depth && used < 3; ++d) {
+                uint32_t pc = g_samples[i].pc[d];
+                if (is_system(pc)) continue;
+                if (used++) key += "<";
+                key += where(pc);
+            }
+            ++chains[key.empty() ? std::string("system") : key];
+        }
+        if (!total) continue;
+        std::vector<std::pair<int, std::string>> v;
+        for (auto& kv : chains) v.push_back({ kv.second, kv.first });
+        std::sort(v.begin(), v.end(), [](const std::pair<int, std::string>& a, const std::pair<int, std::string>& b) { return a.first > b.first; });
+        char b[96];
+        _snprintf_s(b, sizeof b, _TRUNCATE, "%s %d samples:", th ? "render" : "main", total);
+        top[th] = b;
+        for (size_t i = 0; i < v.size() && i < 4; ++i) {
+            top[th] += " ["; top[th] += v[i].second;
+            _snprintf_s(b, sizeof b, _TRUNCATE, "] %d%%", v[i].first * 100 / total);
+            top[th] += b;
+        }
+    }
+    if (k <= 400)
+        plog("hitch %ld: main frame %d %.1f ms (in SyncMainWithRender %.1f ms) render busy %.1f ms wait %.1f ms | %s | %s",
+             k, frame, ms, syncMs, renderBusyMs, renderWaitMs, top[0].empty() ? "main no samples" : top[0].c_str(), top[1].empty() ? "render no samples" : top[1].c_str());
+    if (g_traceFile) {
+        for (int i = 0; i < nSamples; ++i) {
+            fprintf(g_traceFile, "%ld\t%d\t%.1f\t%c\t%.1f", k, frame, ms, g_samples[i].thread, qpc_ms(g_samples[i].at));
+            for (int d = 0; d < g_samples[i].depth; ++d) fprintf(g_traceFile, "\t%s", where(g_samples[i].pc[d]).c_str());
+            fputc('\n', g_traceFile);
+        }
+        fflush(g_traceFile);
+    }
+}
+
+static DWORD WINAPI trace_thread(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    double budget = perfcore::option_int(g_switches, "trace_budget_ms", 50, 5, 10000);
+    int period = perfcore::option_int(g_switches, "trace_period_ms", 2, 1, 100);
+    int maxSamples = perfcore::option_int(g_switches, "trace_max_samples", 400, 10, kTraceMaxSamples);
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    if (!timer) timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    TracedThread mainT = {}, renderT = {};
+    LONG frame = g_mainFrames;
+    int n = 0;
+    LONGLONG frameRenderBusy = 0;
+    for (;;) {
+        LARGE_INTEGER due; due.QuadPart = -10000LL * period;
+        if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, 1000); else Sleep(period);
+        LONG f = g_mainFrames;
+        if (f != frame) {
+            double ms = qpc_ms(g_mainLastLen);
+            if (n || ms > budget)
+                finish_hitch(f, ms, qpc_ms(g_mainLastSync), qpc_ms(frameRenderBusy ? frameRenderBusy : g_renderLastBusy), qpc_ms(g_renderLastWait), n);
+            frame = f; n = 0; frameRenderBusy = 0;
+        }
+        LONGLONG now = qpc_now(), start = g_mainStart;
+        if (!start || n >= maxSamples) continue;
+        if (qpc_ms(now - start) > budget && g_mainThreadId && open_traced(mainT, g_mainThreadId) && sample_thread(mainT, 'M', g_samples[n])) ++n;
+        LONGLONG busy = g_renderBusySince;
+        if (busy && n < maxSamples && qpc_ms(now - busy) > budget && g_renderThreadId && open_traced(renderT, g_renderThreadId) &&
+            sample_thread(renderT, 'R', g_samples[n])) { ++n; frameRenderBusy = now - busy; }
+    }
+}
+
+static int install_frame_trace(BYTE* base, std::string& why) {
+    if (!install_sync_hooks(base, "diag-frame-trace", why)) return -1;
+    QueryPerformanceFrequency(&g_qpf);
+    g_samples = (TraceSample*)VirtualAlloc(NULL, sizeof(TraceSample) * kTraceMaxSamples, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_samples) { why = "no sample buffer"; return -1; }
+    wchar_t path[MAX_PATH];
+    DWORD len = GetModuleFileNameW(g_self, path, MAX_PATH);
+    wchar_t* slash = len && len < MAX_PATH ? wcsrchr(path, L'\\') : nullptr;
+    if (slash) {
+        _snwprintf_s(slash + 1, MAX_PATH - (slash + 1 - path), _TRUNCATE, L"frametrace-%lu.tsv", GetCurrentProcessId());
+        g_traceFile = _wfsopen(path, L"w", _SH_DENYWR);
+        if (g_traceFile) fputs("hitch\tframe\tframe_ms\tthread\tsample_ms\tstack...\n", g_traceFile);
+    }
+    g_traceOn = true;
+    HANDLE t = CreateThread(NULL, 0, trace_thread, NULL, 0, NULL);
+    if (!t) { why = "cannot start the sampler"; return -1; }
+    CloseHandle(t);
+    char b[120];
+    _snprintf_s(b, sizeof b, _TRUNCATE, "+0x199610/+0x1958F0 hooks, budget %d ms", perfcore::option_int(g_switches, "trace_budget_ms", 50, 5, 10000));
+    why = b;
     return 1;
 }
 
@@ -523,6 +782,342 @@ static DWORD WINAPI diag_thread(LPVOID) {
     for (;;) { log_resources(); Sleep((DWORD)interval * 1000); }
 }
 
+// ---- physics-role-guard / diag-physics-role --------------------------------------------------------
+// CryPhysics keeps per-caller scratch buffers (contacts, contact areas, BV-tree and triangle buffers)
+// indexed by iCaller = *TLS(0x3520D814). The "physics thread" points at a cell holding 0; every other
+// thread points at a cell holding 4 (MAX_PHYS_THREADS) or has no TLS value (also 4). Slot 4 is shared
+// and its users lock it; slot 0 is not locked, it belongs to one thread. MarkAsPhysThread
+// (FUN_350827D0(1)) hands the role to its caller with a plain swap of two cells, without waiting for
+// the previous owner:
+//     if (TLS != *cur) { **cur = 4; other = partner(*cur); *other = 0; *cur = other; TLS = other; }
+// CPhysicalWorld::TracePendingRays (world vtable slot 44, FUN_351C3F70) starts with that call, and
+// both the main thread (every frame) and the physics thread (every step) call it (live trace
+// 2026-11-23). So the role moves to the main thread and back every frame, and the thread that loses
+// it keeps iCaller 0 for the query it is in (iCaller is read once per query). Both threads then fill
+// the same unlocked buffers: the CryPhysics+0x1689BE write-0x10 (CGeometry::Intersect: the area
+// pointer of contact 0 zeroed by the other thread between two reads), +0xAD1DB (camera sweep) and
+// the BV-tree / triangle faults, all while streaming fills the world with new geometry.
+//
+// physics-role-guard: a TracePendingRays call from a thread that is not the owner, while an owner
+// exists (its cell holds 0), runs as an ordinary caller (iCaller 4, the locked shared slot). For the
+// call, the role pointer and the caller's TLS are parked on a private cell pair, so MarkAsPhysThread
+// sees "already the owner" and swaps nothing; the owner keeps iCaller 0. If the owner takes the role
+// itself meanwhile (its own TimeStep), the partner rule moves it into the private pair's other cell,
+// which stays valid. Guarded calls are serialized. No image byte changes: the slot is replaced in a
+// heap copy of the world's vtable (gEnv->pPhysicalWorld vptr swap); the protector rejects CryPhysics
+// code changes.
+typedef void (__thiscall* StepFn)(void*, float, int);
+typedef int (__thiscall* RaysFn)(void*, int);
+static StepFn g_stepOriginal;
+static RaysFn g_raysOriginal;
+static BYTE* g_physBase;
+static void* g_world;
+static void** g_worldVtable;      // original
+static void** g_worldCopy;        // ours (slot -1 = RTTI locator copied)
+static bool g_roleTrace, g_roleGuard;
+static volatile DWORD g_mainTid;
+struct StepStats { DWORD tid; LONG calls, positive, took, lost, rays, raysTook, raysGuarded; bool held; void* cell; };
+static StepStats g_steps[16];
+static SRWLOCK g_stepLock = SRWLOCK_INIT;
+static CRITICAL_SECTION g_parkLock;
+static volatile LONG g_roleTakes, g_roleLogs, g_guarded, g_guardMoved, g_guardSkipped;
+// Thread inside TimeStep that held iCaller 0 when the step began (diag-physics-role only), and the
+// TracePendingRays calls of other threads that came in meanwhile: unguarded they take the role
+// while the owner steps (the race), guarded they are parked.
+static volatile DWORD g_stepOwnerTid;
+static volatile LONG g_unsafeTakes, g_unsafeParked;
+// Two private cell pairs, 8-byte aligned like the engine pair (partner = cell ^ 4 relative to 0x352040F8).
+__declspec(align(8)) static volatile LONG g_park[2][2] = { { 4, 4 }, { 4, 4 } };
+
+static void* volatile* role_current() { return (void* volatile*)(g_physBase + kPhysRoleCurrent); }
+static DWORD role_tls() { return *(DWORD*)(g_physBase + kPhysTlsIndex); }
+static bool in_pair(const void* cell, const volatile LONG* pair) { return cell == (const void*)&pair[0] || cell == (const void*)&pair[1]; }
+static bool holds_role(void* mine) { return mine && mine == *role_current(); }
+
+static StepStats* stats_for(DWORD tid) {
+    for (StepStats& x : g_steps) if (x.tid == tid || !x.tid) { if (!x.tid) x.tid = tid; return &x; }
+    return nullptr;
+}
+static void note(bool step, bool before, bool after, bool guarded, float dt, int arg) {
+    DWORD tid = GetCurrentThreadId();
+    bool first = false, took = !before && after;
+    AcquireSRWLockExclusive(&g_stepLock);
+    StepStats* s = stats_for(tid);
+    if (s) {
+        if (step) { first = s->calls == 0; ++s->calls; if (dt > 0) ++s->positive; if (took) ++s->took; }
+        else { first = s->rays == 0; ++s->rays; if (took) ++s->raysTook; if (guarded) ++s->raysGuarded; }
+        if (s->held && !before) ++s->lost;   // another thread took the role since this thread's last call
+        s->held = after; s->cell = TlsGetValue(role_tls());
+    }
+    ReleaseSRWLockExclusive(&g_stepLock);
+    const char* main = tid == g_mainTid ? " (main)" : "";
+    if (first && step) plog("physics step: thread %lu%s first TimeStep(dt=%.4f, flags=0x%X)", tid, main, dt, arg);
+    if (first && !step) plog("physics rays: thread %lu%s first TracePendingRays(%d), holds the role: %d", tid, main, arg, (int)before);
+    if (took) {
+        InterlockedIncrement(&g_roleTakes);
+        if (InterlockedIncrement(&g_roleLogs) <= 60)
+            plog("physics role: thread %lu%s took iCaller 0 in %s", tid, main, step ? "TimeStep" : "TracePendingRays");
+    }
+}
+
+// The thread whose TimeStep (dt > 0) ran last: the physics thread, or the main thread when physics is
+// single-threaded. Only it may take the role through TracePendingRays.
+static volatile DWORD g_stepper;
+static volatile LONG g_unmarksParked;
+// Ownerless pair for the slot-34 unmark (8-byte aligned, same partner rule).
+__declspec(align(8)) static volatile LONG g_phantom[2] = { 4, 4 };
+typedef void (__thiscall* VoidFn)(void*);
+static VoidFn g_unmarkOriginal;
+
+static int __fastcall hk_trace_rays(void* self, void*, int doTracing) {
+    DWORD err = GetLastError();
+    DWORD idx = role_tls(), tid = GetCurrentThreadId();
+    void* mine = TlsGetValue(idx);
+    void* owner = *role_current();
+    bool before = holds_role(mine);
+    int r;
+    bool guarded = false;
+    DWORD stepper = g_stepOwnerTid;
+    if (g_roleTrace && !before && stepper && stepper != tid)
+        InterlockedIncrement(g_roleGuard ? &g_unsafeParked : &g_unsafeTakes);   // the owner is mid-step right now
+    DWORD physThread = g_stepper;
+    if (g_roleGuard && !before && owner && physThread && physThread != tid) {
+        EnterCriticalSection(&g_parkLock);
+        owner = *role_current();
+        if (!holds_role(mine) && owner) {
+            volatile LONG* pair = in_pair(owner, g_park[0]) ? g_park[1] : g_park[0];
+            pair[0] = 4; pair[1] = 4;               // a free pair: only non-owner cells, 4 is their value
+            TlsSetValue(idx, (void*)&pair[0]);
+            if (InterlockedCompareExchangePointer(role_current(), (void*)&pair[0], owner) == owner) {
+                SetLastError(err);
+                r = g_raysOriginal(self, doTracing);
+                err = GetLastError();
+                if (InterlockedCompareExchangePointer(role_current(), owner, (void*)&pair[0]) != (void*)&pair[0])
+                    InterlockedIncrement(&g_guardMoved);   // the physics thread took the role meanwhile (now on pair[1])
+                TlsSetValue(idx, mine);
+                InterlockedIncrement(&g_guarded);
+                guarded = true;
+            } else {
+                TlsSetValue(idx, mine);                  // the role moved before the park: engine behaviour
+                InterlockedIncrement(&g_guardSkipped);
+                SetLastError(err);
+                r = g_raysOriginal(self, doTracing);
+                err = GetLastError();
+            }
+        } else {
+            InterlockedIncrement(&g_guardSkipped);
+            SetLastError(err);
+            r = g_raysOriginal(self, doTracing);
+            err = GetLastError();
+        }
+        LeaveCriticalSection(&g_parkLock);
+    } else {
+        SetLastError(err);
+        r = g_raysOriginal(self, doTracing);
+        err = GetLastError();
+    }
+    if (g_roleTrace) note(false, before, holds_role(TlsGetValue(idx)), guarded, 0, doTracing);
+    SetLastError(err);
+    return r;
+}
+
+// Slot 34 hands the owner's role to the partner cell, which belongs to the previous owner (usually the
+// main thread): the main thread silently gets iCaller 0 until the physics thread takes it back, possibly
+// in the middle of a main-thread query. With the guard the owner's unmark parks the role on an ownerless
+// cell; the next TimeStep (or the physics thread's TracePendingRays) takes it from there, from nobody.
+static void __fastcall hk_unmark(void* self, void*) {
+    DWORD err = GetLastError();
+    DWORD idx = role_tls();
+    void* mine = TlsGetValue(idx);
+    if (g_roleGuard) {
+        EnterCriticalSection(&g_parkLock);
+        if (mine && mine == *role_current()) {
+            g_phantom[0] = 0; g_phantom[1] = 4;
+            InterlockedExchangePointer(role_current(), (void*)&g_phantom[0]);
+            *(volatile LONG*)mine = 4;
+            TlsSetValue(idx, nullptr);
+            InterlockedIncrement(&g_unmarksParked);
+            LeaveCriticalSection(&g_parkLock);
+            if (g_roleTrace) plog("physics role: thread %lu unmarked; role parked ownerless (the engine hands it to the partner cell)", GetCurrentThreadId());
+            SetLastError(err);
+            return;
+        }
+        LeaveCriticalSection(&g_parkLock);
+    }
+    if (g_roleTrace) plog("physics role: thread %lu%s called unmark (slot 34), holds the role: %d", GetCurrentThreadId(),
+                          GetCurrentThreadId() == g_mainTid ? " (main)" : "", (int)(mine && mine == *role_current()));
+    SetLastError(err);
+    g_unmarkOriginal(self);
+}
+
+static void __fastcall hk_timestep(void* self, void*, float dt, int flags) {
+    DWORD err = GetLastError();
+    DWORD idx = role_tls();
+    bool before = holds_role(TlsGetValue(idx));
+    if (dt > 0) g_stepper = GetCurrentThreadId();
+    SetLastError(err);
+    if (before) g_stepOwnerTid = GetCurrentThreadId();
+    g_stepOriginal(self, dt, flags);
+    if (before) g_stepOwnerTid = 0;
+    if (!g_roleTrace) return;
+    err = GetLastError();
+    note(true, before, holds_role(TlsGetValue(idx)), false, dt, flags);
+    SetLastError(err);
+}
+
+// TLS value of another thread of this process (TEB TlsSlots +0xE10 / TlsExpansionSlots +0xF94).
+static bool thread_tls(DWORD tid, DWORD idx, void** value) {
+    if (!g_queryThread) return false;
+    HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+    if (!h) return false;
+    struct { LONG exitStatus; BYTE* teb; DWORD pid, tidc; ULONG_PTR affinity; LONG prio, basePrio; } tbi = {};
+    bool ok = g_queryThread(h, 0, &tbi, sizeof tbi, NULL) >= 0 && tbi.teb;
+    CloseHandle(h);
+    if (!ok) return false;
+    if (idx < 64) { *value = *(void* volatile*)(tbi.teb + 0xE10 + idx * 4); return true; }
+    void** exp = *(void***)(tbi.teb + 0xF94);
+    if (!exp || idx >= 64 + 1024) return false;
+    *value = exp[idx - 64];
+    return true;
+}
+// diag-physics-role sampler: every 2 ms, does more than one stepping thread see iCaller 0?
+static volatile LONG g_sampleTotal, g_sampleShared, g_sampleMainOwner;
+static DWORD WINAPI role_sampler(LPVOID) {
+    for (;;) {
+        Sleep(2);
+        DWORD tids[16]; int n = 0;
+        AcquireSRWLockShared(&g_stepLock);
+        for (StepStats& x : g_steps) { if (!x.tid) break; tids[n++] = x.tid; }
+        ReleaseSRWLockShared(&g_stepLock);
+        if (n < 2) continue;
+        DWORD idx = role_tls();
+        int zero = 0; bool mainZero = false;
+        for (int k = 0; k < n; ++k) {
+            void* v = nullptr;
+            if (thread_tls(tids[k], idx, &v) && v && readable(v, 4) && *(volatile LONG*)v == 0) { ++zero; if (tids[k] == g_mainTid) mainZero = true; }
+        }
+        InterlockedIncrement(&g_sampleTotal);
+        if (zero > 1) InterlockedIncrement(&g_sampleShared);
+        if (mainZero) InterlockedIncrement(&g_sampleMainOwner);
+    }
+}
+
+static std::string physics_role_summary() {
+    std::string out;
+    char b[300];
+    void* cur = *role_current();
+    const LONG* cells = (const LONG*)(g_physBase + kPhysRoleCells);
+    _snprintf_s(b, sizeof b, _TRUNCATE, "physics role: takes=%ld guarded=%ld guard_moved=%ld guard_skipped=%ld unmarks_parked=%ld stepper=%lu rays_during_owner_step: unguarded=%ld parked=%ld current=%p cells=[%ld,%ld] park=[%ld,%ld][%ld,%ld]\n",
+                g_roleTakes, g_guarded, g_guardMoved, g_guardSkipped, g_unmarksParked, g_stepper, g_unsafeTakes, g_unsafeParked, cur, cells[0], cells[1], g_park[0][0], g_park[0][1], g_park[1][0], g_park[1][1]);
+    out += b;
+    AcquireSRWLockShared(&g_stepLock);
+    for (StepStats& x : g_steps) {
+        if (!x.tid) break;
+        _snprintf_s(b, sizeof b, _TRUNCATE, "physics thread %lu%s: steps=%ld dt>0=%ld step_took=%ld rays=%ld rays_took=%ld rays_guarded=%ld lost=%ld holds=%d cell=%p\n",
+                    x.tid, x.tid == g_mainTid ? " (main)" : "", x.calls, x.positive, x.took, x.rays, x.raysTook, x.raysGuarded, x.lost, (int)x.held, x.cell);
+        out += b;
+        void* now = nullptr;
+        if (thread_tls(x.tid, role_tls(), &now))
+            _snprintf_s(b, sizeof b, _TRUNCATE, "  tls now=%p value=%ld\n", now, now && readable(now, 4) ? *(volatile LONG*)now : 4L);
+        else _snprintf_s(b, sizeof b, _TRUNCATE, "  tls unreadable\n");
+        out += b;
+    }
+    ReleaseSRWLockShared(&g_stepLock);
+    _snprintf_s(b, sizeof b, _TRUNCATE, "role samples (2 ms): total=%ld two_threads_with_icaller0=%ld main_with_icaller0=%ld\n",
+                g_sampleTotal, g_sampleShared, g_sampleMainOwner);
+    out += b;
+    return out;
+}
+
+// Installs the wrappers once gEnv->pPhysicalWorld exists. Runs on its own thread: loader calls first,
+// g_lock only for the status.
+static void set_world_state(State s, const char* why) {
+    EnterCriticalSection(&g_lock);
+    for (int i = 0; i < kPatchCount; ++i)
+        if (kPatches[i].kind == WORLD && g_status[i].on && g_status[i].state == PENDING) set_state(i, s, why);
+    LeaveCriticalSection(&g_lock);
+}
+static DWORD WINAPI world_thread(LPVOID) {
+    for (int round = 0; round < 3000; ++round, Sleep(100)) {     // 300 s
+        HMODULE css = GetModuleHandleW(L"CryScriptSystem.dll");
+        BYTE* env = css ? *(BYTE* volatile*)((BYTE*)css + kCssGEnv) : nullptr;
+        void* world = env && readable(env + kGEnvPhysicalWorld, 4) ? *(void* volatile*)(env + kGEnvPhysicalWorld) : nullptr;
+        if (!world || !readable(world, 4)) continue;
+        void** vt = *(void***)world;
+        if ((BYTE*)vt != g_physBase + kPhysWorldVtable || vt[kPhysTimeStepSlot] != g_physBase + kPhysTimeStep ||
+            vt[kPhysTraceRaysSlot] != g_physBase + kPhysTraceRays || vt[kPhysUnmarkSlot] != g_physBase + kPhysUnmark) {
+            set_world_state(REFUSED, "gEnv->pPhysicalWorld is not the r208022 CPhysicalWorld (vtable, TimeStep or TracePendingRays or unmark slot differs)");
+            return 0;
+        }
+        size_t n = 0;
+        while (n < 256 && (BYTE*)vt[n] >= g_physBase && (BYTE*)vt[n] < g_physBase + kModules[CRYPHYSICS].sizeOfImage) ++n;
+        void** copy = n > kPhysTraceRaysSlot ? (void**)VirtualAlloc(NULL, (n + 1) * sizeof(void*), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) : nullptr;
+        if (!copy) { set_world_state(REFUSED, "vtable copy failed"); return 0; }
+        copy[0] = vt[-1];
+        memcpy(copy + 1, vt, n * sizeof(void*));
+        g_stepOriginal = (StepFn)vt[kPhysTimeStepSlot];
+        g_raysOriginal = (RaysFn)vt[kPhysTraceRaysSlot];
+        copy[1 + kPhysTraceRaysSlot] = (void*)&hk_trace_rays;
+        copy[1 + kPhysTimeStepSlot] = (void*)&hk_timestep;          // tracks the stepping thread (and traces)
+        g_unmarkOriginal = (VoidFn)vt[kPhysUnmarkSlot];
+        copy[1 + kPhysUnmarkSlot] = (void*)&hk_unmark;
+        DWORD old;
+        VirtualProtect(copy, (n + 1) * sizeof(void*), PAGE_READONLY, &old);
+        g_world = world; g_worldVtable = vt; g_worldCopy = copy + 1;
+        if (InterlockedCompareExchangePointer((void* volatile*)world, (void*)(copy + 1), (void*)vt) != (void*)vt) {
+            set_world_state(REFUSED, "world vtable pointer changed during the swap");
+            return 0;
+        }
+        char b[160];
+        _snprintf_s(b, sizeof b, _TRUNCATE, "world vtable copy (%u slots, world %p): TimeStep, unmark and TracePendingRays wrapped", (unsigned)n, world);
+        set_world_state(APPLIED, b);
+        if (g_roleTrace) { HANDLE t = CreateThread(NULL, 0, role_sampler, NULL, 0, NULL); if (t) CloseHandle(t); }
+        return 0;
+    }
+    set_world_state(REFUSED, "gEnv->pPhysicalWorld did not appear within 300 s");
+    return 0;
+}
+
+// ---- diag-fulldump -------------------------------------------------------------------------------
+// One MiniDumpWithFullMemory on the first access violation inside CryPhysics or Cry3DEngine (first
+// chance, from a vectored handler; the exception then continues to the engine's own handler).
+typedef BOOL (WINAPI* MiniDumpFn)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+static MiniDumpFn g_miniDump;
+static volatile LONG g_dumped;
+static wchar_t g_dumpDir[MAX_PATH];
+static uintptr_t g_dumpRanges[4];
+
+static LONG CALLBACK fulldump_handler(EXCEPTION_POINTERS* ep) {
+    if (!ep || ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !g_miniDump) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t at = (uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+    bool inside = (at >= g_dumpRanges[0] && at < g_dumpRanges[1]) || (at >= g_dumpRanges[2] && at < g_dumpRanges[3]);
+    if (!inside || InterlockedCompareExchange(&g_dumped, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%sfulldump-%lu-%llu.dmp", g_dumpDir, GetCurrentProcessId(), GetTickCount64());
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return EXCEPTION_CONTINUE_SEARCH;
+    struct { DWORD tid; EXCEPTION_POINTERS* ep; BOOL client; } mei = { GetCurrentThreadId(), ep, FALSE };
+    // MiniDumpWithFullMemory 0x2 | HandleData 0x4 | UnloadedModules 0x20 | FullMemoryInfo 0x800 | ThreadInfo 0x1000
+    BOOL ok = g_miniDump(GetCurrentProcess(), GetCurrentProcessId(), f, 0x2 | 0x4 | 0x20 | 0x800 | 0x1000, &mei, NULL, NULL);
+    CloseHandle(f);
+    plog("diag-fulldump: access violation at %p (thread %lu%s): %s", (void*)at, GetCurrentThreadId(),
+         GetCurrentThreadId() == g_mainTid ? ", main" : "", ok ? "full dump written" : "dump failed");
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void start_fulldump(HMODULE self) {
+    DWORD n = GetModuleFileNameW(self, g_dumpDir, MAX_PATH);
+    wchar_t* slash = n && n < MAX_PATH ? wcsrchr(g_dumpDir, L'\\') : nullptr;
+    if (!slash) { plog("diag-fulldump: no driver directory"); return; }
+    slash[1] = 0;
+    HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
+    g_miniDump = dbghelp ? (MiniDumpFn)GetProcAddress(dbghelp, "MiniDumpWriteDump") : nullptr;
+    // engine images: CryPhysics 0x34FF0000 + 0x75B400, Cry3DEngine 0x30000000 + 0x38A000 (fixed bases)
+    g_dumpRanges[0] = 0x34FF0000; g_dumpRanges[1] = 0x34FF0000 + 0x75B400;
+    g_dumpRanges[2] = 0x30000000; g_dumpRanges[3] = 0x30000000 + 0x38A000;
+    if (!g_miniDump || !AddVectoredExceptionHandler(1, fulldump_handler)) { plog("diag-fulldump: not available"); return; }
+    plog("diag-fulldump: armed (CryPhysics, Cry3DEngine)");
+}
+
 // ---- per-module application ----------------------------------------------------------------------
 static void apply_hook(int i, BYTE* base, bool late) {
     const char* id = kPatches[i].id;
@@ -548,6 +1143,8 @@ static void apply_hook(int i, BYTE* base, bool late) {
     } else if (!strcmp(id, "render-thread-event-sync")) {
         g_spins = perfcore::option_int(g_switches, "rt_spins", 256, 0, 100000);
         r = install_render_sync(base, why);
+    } else if (!strcmp(id, "diag-frame-trace")) {
+        r = install_frame_trace(base, why);
     } else if (!strcmp(id, "pak-catalog-scope") || !strcmp(id, "pak-findchild-index")) {
         bool wantIndex = is_on("pak-findchild-index");
         int scope = index_of("pak-catalog-scope"), findc = index_of("pak-findchild-index");
@@ -573,6 +1170,26 @@ static void apply_hook(int i, BYTE* base, bool late) {
     else if (r < 0) set_state(i, REFUSED, why.c_str());
 }
 
+// CryPhysics loaded: check the rows the wrapper relies on (reads only), then wait for the world on
+// world_thread. Caller holds g_lock.
+static bool g_worldThread;
+static void start_world(int i, BYTE* base) {
+    for (const Site& x : kSites) {
+        if (strcmp(x.id, kPatches[i].id) != 0) continue;
+        std::string why;
+        if (!site_ok(base, x.id, x.rva, why)) { set_state(i, REFUSED, why.c_str()); return; }
+    }
+    g_physBase = base;
+    if (!strcmp(kPatches[i].id, "physics-role-guard")) g_roleGuard = true;
+    if (!strcmp(kPatches[i].id, "diag-physics-role")) g_roleTrace = true;
+    if (!g_worldThread) {
+        HANDLE t = CreateThread(NULL, 0, world_thread, NULL, 0, NULL);
+        if (!t) { set_state(i, REFUSED, "cannot start the world thread"); return; }
+        CloseHandle(t);
+        g_worldThread = true;
+    }
+}
+
 // Caller holds g_lock and must not call the loader.
 static void handle_module(int m, BYTE* base, const char* how) {
     ModuleState& ms = g_mods[m];
@@ -587,6 +1204,7 @@ static void handle_module(int m, BYTE* base, const char* how) {
         if (!known) { set_state(i, REFUSED, why.c_str()); continue; }
         if (kPatches[i].kind == BYTES) apply_bytes(i, base, ms.late);
         else if (kPatches[i].kind == HOOK) apply_hook(i, base, ms.late);
+        else if (kPatches[i].kind == WORLD) start_world(i, base);
         else if (kPatches[i].kind == EXTERNAL) {
             if (startup::install_at(base)) set_state(i, APPLIED, "+0x23776/+0x2378A priorities");
             else set_state(i, REFUSED, "calibration code differs from r208022");
@@ -601,6 +1219,7 @@ static bool retry_pending() {
         if (!g_status[i].on || g_status[i].state != PENDING || kPatches[i].module < 0) continue;
         ModuleState& ms = g_mods[kPatches[i].module];
         if (!ms.ready) { left = true; continue; }
+        if (kPatches[i].kind == WORLD) { if (g_mods[kPatches[i].module].ready) continue; left = true; continue; }
         if (kPatches[i].kind == HOOK && kPatches[i].earlyOnly) set_state(i, REFUSED, "code hook not installed at module start (not retried on running code)");
         else if (kPatches[i].kind == HOOK) apply_hook(i, ms.base, ms.late);
         if (g_status[i].state == PENDING) left = true;
@@ -643,7 +1262,7 @@ static VOID CALLBACK on_dll_loaded(ULONG reason, const LoadedData* d, void*) {
             LoaderEntry* e = loader_entry(d->base);
             if (e && e->entry) {
                 ms.entry = (BOOL (WINAPI*)(HINSTANCE, DWORD, LPVOID))e->entry;
-                e->entry = m == CRYSYSTEM ? (void*)&entry_wrapper<CRYSYSTEM> : (void*)&entry_wrapper<CRYRENDER>;
+                e->entry = m == CRYSYSTEM ? (void*)&entry_wrapper<CRYSYSTEM> : m == CRYRENDER ? (void*)&entry_wrapper<CRYRENDER> : (void*)&entry_wrapper<CRYPHYSICS>;
                 ms.wrapped = true;
             } else {
                 plog("%s: loader entry not found; the worker applies the late-safe patches", kModules[m].name);
@@ -657,6 +1276,13 @@ static VOID CALLBACK on_dll_loaded(ULONG reason, const LoadedData* d, void*) {
 static DWORD WINAPI worker(LPVOID) {
     if (is_on("pak-prefetch")) { HANDLE t = CreateThread(NULL, 0, prefetch_thread, NULL, 0, NULL); if (t) CloseHandle(t); }
     if (is_on("diag-resources")) { HANDLE t = CreateThread(NULL, 0, diag_thread, NULL, 0, NULL); if (t) CloseHandle(t); }
+    if (is_on("diag-fulldump")) start_fulldump(g_self);
+    EnterCriticalSection(&g_lock);
+    for (int i = 0; i < kPatchCount; ++i)
+        if (kPatches[i].kind == THREAD && g_status[i].on && g_status[i].state == PENDING)
+            set_state(i, !strcmp(kPatches[i].id, "diag-fulldump") && !g_miniDump ? REFUSED : APPLIED,
+                      !strcmp(kPatches[i].id, "diag-fulldump") && !g_miniDump ? "MiniDumpWriteDump not available" : "started");
+    LeaveCriticalSection(&g_lock);
     for (int round = 0; round < 12000; ++round) {      // 120 s
         BYTE* found[MODULE_COUNT] = {};
         for (int m = 0; m < MODULE_COUNT; ++m) {
@@ -674,7 +1300,7 @@ static DWORD WINAPI worker(LPVOID) {
         Sleep(10);
     }
     EnterCriticalSection(&g_lock);
-    for (int i = 0; i < kPatchCount; ++i) if (g_status[i].on && g_status[i].state == PENDING) set_state(i, REFUSED, "module never loaded or never became ready");
+    for (int i = 0; i < kPatchCount; ++i) if (g_status[i].on && g_status[i].state == PENDING && kPatches[i].kind != WORLD) set_state(i, REFUSED, "module never loaded or never became ready");
     LeaveCriticalSection(&g_lock);
     return 0;
 }
@@ -728,8 +1354,10 @@ static void add_cvars(const std::string& text) {
 void attach(HMODULE self, Logger logger) {
     if (g_attached) return;
     g_attached = true;
+    g_self = self;
     g_log = logger;
     InitializeCriticalSection(&g_lock);
+    InitializeCriticalSection(&g_parkLock);
     const wchar_t* cmd = GetCommandLineW();
 
     // switches
@@ -768,6 +1396,8 @@ void attach(HMODULE self, Logger logger) {
     g_getProcAddress[0] = k32 ? GetProcAddress(k32, "GetProcAddress") : nullptr;
     g_getProcAddress[1] = kb ? GetProcAddress(kb, "GetProcAddress") : nullptr;
     g_tls = TlsAlloc();
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    g_queryThread = nt ? (QueryThreadFn)GetProcAddress(nt, "NtQueryInformationThread") : nullptr;
     g_thunks = (BYTE*)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READ);
 
     // modules already in memory (late attach through `aaemu-clientdriver inject`)
@@ -795,7 +1425,8 @@ void remove() {
             if (perfcore::changed_bytes(st.at, orig) <= 1 && write_code(st.at, st.original, st.len)) set_state(i, OFF, "restored");
         }
     }
-    plog("detach: IAT hooks and one-byte patches restored; code hooks stay until exit");
+    // the TimeStep wrapper stays (a step may be running in it); the vtable copy is never freed
+    plog("detach: IAT hooks and one-byte patches restored; code hooks and the physics world wrapper stay until exit");
     LeaveCriticalSection(&g_lock);
 }
 
@@ -819,6 +1450,12 @@ std::string control(const std::string& cmd) {
     _snprintf_s(b, sizeof b, _TRUNCATE, "counters: splitpath_calls=%ld mode_hits=%ld mode_misses=%ld latency_set=%ld index_fallbacks=%ld\n",
                 g_splitCalls, g_modeHits, g_modeMisses, g_latencySet, g_indexFallbacks);
     out += b;
+    if (g_raysOriginal && g_roleTrace) out += physics_role_summary();
+    else if (g_raysOriginal) {
+        _snprintf_s(b, sizeof b, _TRUNCATE, "physics role guard: guarded=%ld guard_moved=%ld guard_skipped=%ld unmarks_parked=%ld stepper=%lu\n",
+                    g_guarded, g_guardMoved, g_guardSkipped, g_unmarksParked, g_stepper);
+        out += b;
+    }
     LeaveCriticalSection(&g_lock);
     return out;
 }
@@ -831,6 +1468,7 @@ std::string first_tick_lua(const std::string& result) {
     }
     if (g_tickStage != 0) return "";
     g_tickStage = 1;
+    g_mainTid = GetCurrentThreadId();
     std::string summary;
     EnterCriticalSection(&g_lock);
     for (int i = 0; i < kPatchCount; ++i) {
